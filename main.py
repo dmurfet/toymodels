@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib
+#matplotlib.use('TkAgg') # on MacOSX
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
@@ -97,7 +99,7 @@ def main(args):
     steps_per_epoch = 128
     decay_factor = 1
     num_plots = 5
-    loss_max = 0.04 # sets the max on plots
+    #loss_max = 0.04 # sets the max on plots
     
     first_snapshot_epoch = 250
     plot_interval = (num_epochs - first_snapshot_epoch) // (num_plots - 1)
@@ -260,6 +262,9 @@ def main(args):
             lr = lr * decay_factor
             print(f'New learning rate: {lr:.5f}')
 
+    ####################
+    # Plotting
+    
     num_plots = len(W_history)
 
     # Plot columns of W matrices
@@ -376,9 +381,10 @@ def main(args):
 
     axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o', label='Plot Intervals')
     axes4.set_xlabel('Epoch')
-    axes4.set_ylabel('Loss (smoothed)')
-    axes4_frob.set_ylabel('Frame potential (green)')
-    axes4.set_ylim([0, loss_max])
+    axes4.set_ylabel('Loss (singleton batch)')
+    axes4_frob.set_ylabel('FP (green)')
+    rolling_loss_max = energy_history[0] / total_train + 0.01
+    axes4.set_ylim([0, rolling_loss_max])
     axes4.set_xlim([0, max(snapshot_epoch) + 20])
     axes4.grid(axis='y', alpha=0.3)
 
