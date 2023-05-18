@@ -245,10 +245,16 @@ def main(args):
                 ax1.plot(batch_sizes, lfes[k-2], "--o", label=f"{k}-gon")
                 ax2.plot(batch_sizes, hatlambdas[k-2], "--o", label=f"{k}-gon")
 
-            ax2.set_xlabel("Number of batches")
+            ax1.set_xticks(batch_sizes)
             ax1.legend(loc='upper right')
+            ax1.grid(axis='y', alpha=0.3)
             ax1.set_ylabel('Local free energy')
+
+            ax2.set_xticks(batch_sizes)
+            ax2.set_xlabel("Number of batches")
+            ax2.grid(axis='y', alpha=0.3)
             ax2.set_ylabel('Hat lambda')
+
             plt.suptitle(f"Sensitivity to num_batches, epochs={num_epochs}, m={m}, n={n}")
             plt.show()
 
