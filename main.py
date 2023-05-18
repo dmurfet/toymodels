@@ -12,6 +12,7 @@ import matplotlib.ticker as ticker
 from copy import deepcopy
 import os
 import argparse
+import itertools
 
 def parse_commandline():
     parser = argparse.ArgumentParser(description="SLT Toy Model")
@@ -25,6 +26,7 @@ def parse_commandline():
     parser.add_argument("--lr", help="Initial learning rate", type=float, default=1e-3)
     parser.add_argument("--polygon_stats", help="Prints only energy and entropy stats for polygons", action="store_true")
     parser.add_argument("--hatlambdas", help="Number of hatlambdas to compute", type=int, default=20)
+    parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
     return parser
 
 class ToyModelsDataset(torch.utils.data.Dataset):
@@ -96,7 +98,6 @@ def main(args):
     m, n = args.m, args.n
     num_epochs = args.epochs
     init_polygon = args.init_polygon
-    num_sgld_chains = args.sgld_chains 
     lr_init = args.lr
 
     steps_per_epoch = 128
@@ -110,11 +111,11 @@ def main(args):
 
     print(f"SLT Toy Model m={m},n={n}")
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
     print(f"Device: {device}")
 
-    def compute_energy(trainloader, model, criterion):
-        # this is nL_n
+    # this is NL_N where N is the training set size
+    def compute_energy(trainloader, model, criterion):   
         energies = []
         with torch.no_grad():
             for data in trainloader:
@@ -124,17 +125,26 @@ def main(args):
                 energies.append(loss * args.batch_size)
         return sum(energies)
     
-    def compute_local_free_energy(trainloader, model, criterion, optimizer, sgld_chains=num_sgld_chains):
-        def closure():
-            dataiter = iter(trainloader)
-            data = next(dataiter)
-            x = data[0].to(device)
+    def compute_local_free_energy(trainloader, model, criterion, optimizer, num_batches=1):
+        dataiter = iter(trainloader)
+        first_items = list(itertools.islice(dataiter, num_batches))
 
+        # TODO: note that p(x_i|x_i,w) is only MSE up to a scale and shift
+        # Computes L_m = 1/m \sum_{i=1}^m p(x_i|x_i, w) where m is the batch_size
+        # times the num_batches
+        def closure():
+            total_loss = 0
+            for data in first_items:
+                x = data[0].to(device)
+                outputs = model(x)
+                loss = criterion(outputs, x)
+                total_loss += loss
+
+            total_loss = total_loss / num_batches
             optimizer.zero_grad()
-            outputs = model(x)
-            loss = criterion(outputs, x)
-            loss.backward()
-            return loss
+            total_loss.backward()
+
+            return total_loss
 
         # Store the current parameter, since we will be doing SGLD trajectories
         # starting here, and will need to reset        
@@ -156,6 +166,7 @@ def main(args):
                     w = param_groups[group_index]["params"][param_index]
                     p.data.copy_(w.data)
 
+        sgld_chains = args.sgld_chains 
         for _ in range(sgld_chains):
             # This outer loop is over SGLD chains, starting at the current optimiser.param
             for _ in range(num_iter):
@@ -175,11 +186,16 @@ def main(args):
                         w_prime.data.add_(gaussian_noise, alpha=(np.sqrt(epsilon)))
 
                 Lms.append(loss)
-                # record average of nL_n(x_l') for l = 1,...,L by using n* minbatch L_m as surrogate
             
             reset_chain()
 
-        local_free_energy = total_train * sum(Lms) / len(Lms)
+        # E_w[ L_m ] where the expectation over the posterior is approximated by SGLD
+        Ew_Lm = sum(Lms) / len(Lms) 
+
+        # N E_w[ L_m ] where N is the training set size, as a surrogate for
+        # N E_w[ L_N ] = E_w[ N L_N ] which by the WBIC Theorem is the free energy
+        # at temperature log(N)
+        local_free_energy = total_train * Ew_Lm 
 
         reset_chain()
 
@@ -194,17 +210,47 @@ def main(args):
     criterion = nn.MSELoss()
 
     if args.polygon_stats:
+        lfes = []
+        hatlambdas = []
+        batch_sizes = range(1,11)
+
         # Print the energies of polygons with current trainset
-        for k in range(n+1):
+        for k in range(2, n+1):
             polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0)
             polygon_model.to(device)
             energy = compute_energy(trainloader_batched, polygon_model, criterion)
             avg_energy = energy / total_train
             optimizer = optim.SGD(polygon_model.parameters(), lr=lr)
-            lfe = compute_local_free_energy(trainloader_batched, polygon_model, criterion, optimizer)
-            hatlambda = (lfe - energy) / np.log(total_train)
+
+            hatlambdas_per_polygon = []
+            lfes_per_polygon = []
+            
+            for num_batches in batch_sizes:
+                lfe = compute_local_free_energy(trainloader_batched, polygon_model, criterion, optimizer, num_batches=num_batches)
+                hatlambda = (lfe - energy) / np.log(total_train)
+                lfes_per_polygon.append(lfe.cpu().detach().clone())
+                hatlambdas_per_polygon.append(hatlambda.cpu().detach().clone())
+
+            hatlambdas.append(hatlambdas_per_polygon)
+            lfes.append(lfes_per_polygon)
 
             print(f"[{k}-gon] energy per sample: {avg_energy:.6f}, hatlambda: {hatlambda:.6f}")
+
+        if len(batch_sizes) > 1:
+            fig = plt.figure(figsize=(35, 30))
+            ax1, ax2 = fig.subplots(2, 1, sharex=True)
+            
+            for k in range(2, n+1):
+                ax1.plot(batch_sizes, lfes[k-2], "--o", label=f"{k}-gon")
+                ax2.plot(batch_sizes, hatlambdas[k-2], "--o", label=f"{k}-gon")
+
+            ax2.set_xlabel("Number of batches")
+            ax1.legend(loc='upper right')
+            ax1.set_ylabel('Local free energy')
+            ax2.set_ylabel('Hat lambda')
+            plt.suptitle(f"Sensitivity to num_batches, epochs={num_epochs}, m={m}, n={n}")
+            plt.show()
+
         return
 
     # The main model for training
