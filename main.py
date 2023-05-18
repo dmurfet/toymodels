@@ -25,6 +25,7 @@ def parse_commandline():
     parser.add_argument("--init_polygon", help="Initial weight matrix", type=int, default=2)
     parser.add_argument("--lr", help="Initial learning rate", type=float, default=1e-3)
     parser.add_argument("--polygon_stats", help="Prints only energy and entropy stats for polygons", action="store_true")
+    parser.add_argument("--max_stat_batches", help="When giving polygon stats, range of batches", type=int, default=10)
     parser.add_argument("--hatlambdas", help="Number of hatlambdas to compute", type=int, default=20)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
     return parser
@@ -212,7 +213,7 @@ def main(args):
     if args.polygon_stats:
         lfes = []
         hatlambdas = []
-        batch_sizes = range(1,11)
+        batch_sizes = range(1,args.max_stat_batches+1)
 
         # Print the energies of polygons with current trainset
         for k in range(2, n+1):
@@ -237,7 +238,7 @@ def main(args):
             print(f"[{k}-gon] energy per sample: {avg_energy:.6f}, hatlambda: {hatlambda:.6f}")
 
         if len(batch_sizes) > 1:
-            fig = plt.figure(figsize=(35, 30))
+            fig = plt.figure(figsize=(25, 20))
             ax1, ax2 = fig.subplots(2, 1, sharex=True)
             
             for k in range(2, n+1):
