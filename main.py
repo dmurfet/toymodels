@@ -377,7 +377,7 @@ def main(args):
     axes4_frob.plot(snapshot_epoch, fp_loss, color='g', marker='o', alpha=0.3, label="FP")
 
     axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o')
-    axes4.set_xlabel('Epoch')
+    axes4.set_xticklabels([])
     axes4.set_ylabel('Loss (batch=1)')
     axes4_frob.set_ylabel('FP (green)')
     rolling_loss_max = energy_history[0] / total_train + 0.01
