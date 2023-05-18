@@ -20,10 +20,11 @@ def parse_commandline():
     parser.add_argument("--n", help="Number of input dimensions", type=int, default=5)
     parser.add_argument("--epochs", help="epochs", type=int, default=6000)
     parser.add_argument("--show", help="plt.show() if specified.", action="store_true")
-    parser.add_argument("--num_sgld_chains", help="Number of SGLD chains to average over during posterior estimates", type=int, default=5)
+    parser.add_argument("--sgld_chains", help="Number of SGLD chains to average over during posterior estimates", type=int, default=5)
     parser.add_argument("--init_polygon", help="Initial weight matrix", type=int, default=2)
     parser.add_argument("--lr", help="Initial learning rate", type=float, default=1e-3)
     parser.add_argument("--polygon_stats", help="Prints only energy and entropy stats for polygons", action="store_true")
+    parser.add_argument("--hatlambdas", help="Number of hatlambdas to compute", type=int, default=20)
     return parser
 
 class ToyModelsDataset(torch.utils.data.Dataset):
@@ -95,14 +96,12 @@ def main(args):
     m, n = args.m, args.n
     num_epochs = args.epochs
     init_polygon = args.init_polygon
-    num_sgld_chains = args.num_sgld_chains 
+    num_sgld_chains = args.sgld_chains 
     lr_init = args.lr
 
     steps_per_epoch = 128
     decay_factor = 1
     num_plots = 5
-    #loss_max = 0.04 # sets the max on plots
-    
     first_snapshot_epoch = 250
     plot_interval = (num_epochs - first_snapshot_epoch) // (num_plots - 1)
     decay_interval = 2 * plot_interval
@@ -111,12 +110,15 @@ def main(args):
 
     print(f"SLT Toy Model m={m},n={n}")
 
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
     def compute_energy(trainloader, model, criterion):
         # this is nL_n
         energies = []
         with torch.no_grad():
             for data in trainloader:
-                x = data[0]
+                x = data[0].to(device)
                 outputs = model(x)
                 loss = criterion(outputs, x)
                 energies.append(loss * args.batch_size)
@@ -126,7 +128,7 @@ def main(args):
         def closure():
             dataiter = iter(trainloader)
             data = next(dataiter)
-            x = data[0]
+            x = data[0].to(device)
 
             optimizer.zero_grad()
             outputs = model(x)
@@ -195,6 +197,7 @@ def main(args):
         # Print the energies of polygons with current trainset
         for k in range(n+1):
             polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0)
+            polygon_model.to(device)
             energy = compute_energy(trainloader_batched, polygon_model, criterion)
             avg_energy = energy / total_train
             optimizer = optim.SGD(polygon_model.parameters(), lr=lr)
@@ -206,6 +209,7 @@ def main(args):
 
     # The main model for training
     model = ToyModelsNet(n, m, init_config=init_polygon, noise_scale=0.1)
+    model.to(device)
     optimizer = optim.SGD(model.parameters(), lr=lr)
 
     W_history = []
@@ -224,7 +228,7 @@ def main(args):
 
         for _ in range(steps_per_epoch):
             data = next(dataiter)
-            x = data[0]
+            x = data[0].to(device)
             
             # Forward pass
             output = model(x)
@@ -240,18 +244,18 @@ def main(args):
         # Save W matrix at regular intervals
         if (epoch - first_snapshot_epoch + 1) % plot_interval == 0:
             snapshot_epoch.append(epoch+1)
-            W_history.append(model.W.detach().clone())
-            b_history.append(model.b.detach().clone())
+            W_history.append(model.W.cpu().detach().clone())
+            b_history.append(model.b.cpu().detach().clone())
 
-        if show_lfe and epoch > first_snapshot_epoch and (epoch + 1) % (num_epochs // 20) == 0:
+        if show_lfe and epoch > first_snapshot_epoch and (epoch + 1) % (num_epochs // args.hatlambdas) == 0:
             lfe_epochs.append(epoch+1)
             energy = compute_energy(trainloader_batched, model, criterion)
             lfe = compute_local_free_energy(trainloader_batched, model, criterion, optimizer)
             hatlambda = (lfe - energy) / np.log(total_train)
 
-            energy_history.append(energy.detach().clone())
-            lfe_history.append(lfe.detach().clone())
-            hatlambda_history.append(hatlambda.detach().clone())
+            energy_history.append(energy.cpu().detach().clone())
+            lfe_history.append(lfe.cpu().detach().clone())
+            hatlambda_history.append(hatlambda.cpu().detach().clone())
 
         epoch_loss = epoch_loss / steps_per_epoch
 
