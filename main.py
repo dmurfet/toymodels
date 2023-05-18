@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib
-#matplotlib.use('TkAgg') # on MacOSX
+import platform
+if platform.system() == 'Darwin':
+    matplotlib.use('TkAgg') # on MacOSX
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
@@ -260,7 +262,8 @@ def main(args):
 
         if (epoch - first_snapshot_epoch + 1) % decay_interval == 0:
             lr = lr * decay_factor
-            print(f'New learning rate: {lr:.5f}')
+            if decay_factor != 1:
+                print(f'New learning rate: {lr:.5f}')
 
     ####################
     # Plotting
@@ -279,7 +282,7 @@ def main(args):
 
     gs = gridspec.GridSpec(plot_rows, num_plots, height_ratios=plot_ratios)
     fig = plt.figure(figsize=(35, plot_height))
-    fig.suptitle(f"Toy models (n={n}, m={m}, steps_per_epoch={steps_per_epoch}, lr={lr_init}, num_sgld_chains={num_sgld_chains}, final_loss={epoch_loss:.5f})", fontsize=10)
+    fig.suptitle(f"Toy models (n={n}, m={m}, lr={lr_init})", fontsize=10)
     if m == 2:
         axes1 = [fig.add_subplot(gs[0, i]) for i in range(num_plots)]
     elif m == 3:
@@ -325,7 +328,7 @@ def main(args):
         # Plot the distribution of column norms
         axes2[i].hist(column_norms, bins=np.linspace(0, 2, num=21), alpha=0.75, range=(0,2))
         if i == 0:
-            axes2[i].set_ylabel('Freq (W col norm)')
+            axes2[i].set_ylabel('W')
             axes2[i].tick_params(axis='x', labelsize=8)
         else:
             axes2[i].set_xticklabels([])
@@ -334,19 +337,13 @@ def main(args):
         axes2[i].set_xticks(np.arange(0, 2.1, 0.5))
         axes2[i].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
 
-        # Compute the discrepancy (a cheap measure for tightness). It is non-negative if
-        # and only if a tight frame exists with these norms
-        #squared_norms = np.square(column_norms)
-        #sum_of_squares = np.sum(squared_norms)
-        #discrep_history.append(1/m * sum_of_squares - np.max(squared_norms))
-
     for i, b in enumerate(b_history):
         biases = b.cpu().numpy()
 
         # Plot the distribution of column norms
         axes3[i].hist(biases, bins=np.linspace(-2, 0.5, num=21), alpha=0.75, range=(-2,0.5))
         if i == 0:
-            axes3[i].set_ylabel('Freq (b)')
+            axes3[i].set_ylabel('b')
             axes3[i].tick_params(axis='x', labelsize=8)
         else:
             axes3[i].set_xticklabels([])
@@ -373,20 +370,21 @@ def main(args):
     lower_band = rolling_loss - np.sqrt(rolling_variance)
 
     loss_plot_range = range(smoothing_window//2, len(rolling_loss)+smoothing_window//2)
-    axes4.plot(loss_plot_range, rolling_loss)
+    axes4.plot(loss_plot_range, rolling_loss, label="loss")
     axes4.fill_between(loss_plot_range, lower_band, upper_band, color='gray', alpha=0.1)
 
     axes4_frob = axes4.twinx()
-    axes4_frob.plot(snapshot_epoch, fp_loss, color='g', marker='o', alpha=0.3)
+    axes4_frob.plot(snapshot_epoch, fp_loss, color='g', marker='o', alpha=0.3, label="FP")
 
-    axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o', label='Plot Intervals')
+    axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o')
     axes4.set_xlabel('Epoch')
-    axes4.set_ylabel('Loss (singleton batch)')
+    axes4.set_ylabel('Loss (batch=1)')
     axes4_frob.set_ylabel('FP (green)')
     rolling_loss_max = energy_history[0] / total_train + 0.01
     axes4.set_ylim([0, rolling_loss_max])
     axes4.set_xlim([0, max(snapshot_epoch) + 20])
     axes4.grid(axis='y', alpha=0.3)
+    axes4.legend(loc='lower left')
 
     # Set up the subplot for lfe, energy and hatlambda
     if show_lfe:
