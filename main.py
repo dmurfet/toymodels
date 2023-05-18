@@ -115,37 +115,49 @@ def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
     print(f"Device: {device}")
 
-    # this is NL_N where N is the training set size
+    # Our model is p(y|x,w) where x, y \in R^n and
+    #
+    #       p(y|x,w) = 1/(2pi)^{n/2} exp(-1/2|| y - ReLU(W^TWx + b) ||^2)
+    #
+    # Hence the empirical negative log loss is (n being args.n)
+    #
+    #       L_k(w) = -1/k \sum_{i=1}^k log p(y_i|x_i,w)
+    #              = n/2 log(2pi) + 1/k \sum_{i=1}^k 1/2|| y - ReLU(W^TWx + b ) ||^2
+    #
+    
+    # Computes NL_N where N is the training set size
     def compute_energy(trainloader, model, criterion):   
         energies = []
         with torch.no_grad():
             for data in trainloader:
                 x = data[0].to(device)
                 outputs = model(x)
-                loss = criterion(outputs, x)
-                energies.append(loss * args.batch_size)
-        return sum(energies)
+                batchloss = 1/2 * criterion(outputs, x) * args.batch_size
+
+                # batchloss is the sum over a batch of 1/2|| y - ReLU(W^TWx + b) ||^2
+                energies.append(batchloss)
+
+        total_energy = n/2 * np.log(2 * np.pi) + sum(energies)
+        return total_energy
     
     def compute_local_free_energy(trainloader, model, criterion, optimizer, num_batches=1):
         dataiter = iter(trainloader)
         first_items = list(itertools.islice(dataiter, num_batches))
-
-        # TODO: note that p(x_i|x_i,w) is only MSE up to a scale and shift
-        # Computes L_m = 1/m \sum_{i=1}^m p(x_i|x_i, w) where m is the batch_size
-        # times the num_batches
+        
+        # Computes L_m where m = num_batches * args.batch_size
         def closure():
-            total_loss = 0
+            total = 0
             for data in first_items:
                 x = data[0].to(device)
                 outputs = model(x)
-                loss = criterion(outputs, x)
-                total_loss += loss
+                batchloss = criterion(outputs, x)
+                total += batchloss
 
-            total_loss = total_loss / num_batches
+            total = n/2 * np.log(2 * np.pi) + 1/2 * total / num_batches
             optimizer.zero_grad()
-            total_loss.backward()
+            total.backward()
 
-            return total_loss
+            return total
 
         # Store the current parameter, since we will be doing SGLD trajectories
         # starting here, and will need to reset        
@@ -172,14 +184,14 @@ def main(args):
             # This outer loop is over SGLD chains, starting at the current optimiser.param
             for _ in range(num_iter):
                 with torch.enable_grad():
-                    # call a minibatch loss backward so that we have gradient of average minibatch loss with respect to w'
+                    # computes L_m (including gradients)
                     loss = closure()
 
                 for group_index, group in enumerate(optimizer.param_groups):
                     for param_index, w_prime in enumerate(group["params"]):
                         w = param_groups[group_index]["params"][param_index]
                         # by using the scaling below of w_prime.grad, we are ensuring the SGLD is for full batch posterior at inverse temp 1/log n
-                        dx_prime = -w_prime.grad.data / np.log(total_train) * total_train  #
+                        dx_prime = -w_prime.grad.data / np.log(total_train) * total_train
                         dx_prime.add_(w_prime.data - w.data, alpha=-gamma)
                         w_prime.data.add_(dx_prime, alpha=epsilon / 2)
                         gaussian_noise = torch.empty_like(w_prime)
