@@ -118,12 +118,25 @@ def main(args):
     # Our model is p(y|x,w) where x, y \in R^n and
     #
     #       p(y|x,w) = 1/(2pi)^{n/2} exp(-1/2|| y - ReLU(W^TWx + b) ||^2)
+    #       p(x,y|w) = p(y|x,w)p(x)
     #
     # Hence the empirical negative log loss is (n being args.n)
     #
-    #       L_k(w) = -1/k \sum_{i=1}^k log p(y_i|x_i,w)
-    #              = n/2 log(2pi) + 1/k \sum_{i=1}^k 1/2|| y - ReLU(W^TWx + b ) ||^2
+    #       L_k(w) = -1/k \sum_{i=1}^k log p(y_i,x_i|w)
+    #              = -1/k \sum_{i=1}^k ( logp(y_i|x_i,w) + logp(x_i) )
+    #              = n/2 log(2pi) - 1/k \sum_{i=1}^k logp(y_i|x_i,w) - 1/k \sum_{i=1}^k logp(x_i)
     #
+    # We define the normalised negative log loss to be L'_k(w) = -1/k \sum_{i=1}^k logp(y_i|x_i,w)
+    # That is, 
+    #
+    #       L'_k(w) = 1/k \sum_{i=1}^k 1/2|| y - ReLU(W^TWx + b ) ||^2
+    #
+    # Note that in computing the difference between log losses, the terms omitted by L' cancel
+    # out and can be ignored
+    #
+    #  E_w^\beta[ NL_N(w) ] - NL_N(w_0) = E_w^\beta[ NL'_N ] - NL'_N(w_0)
+    #
+    # Hence in the following we use L' instead of L, and just denote the former L (sorry!)
     
     # Computes NL_N where N is the training set size
     def compute_energy(trainloader, model, criterion):   
@@ -137,14 +150,14 @@ def main(args):
                 # batchloss is the sum over a batch of 1/2|| y - ReLU(W^TWx + b) ||^2
                 energies.append(batchloss)
 
-        total_energy = n/2 * np.log(2 * np.pi) + sum(energies)
+        total_energy = sum(energies)
         return total_energy
     
     def compute_local_free_energy(trainloader, model, criterion, optimizer, num_batches=1):
         dataiter = iter(trainloader)
         first_items = list(itertools.islice(dataiter, num_batches))
         
-        # Computes L_m where m = num_batches * args.batch_size
+        # Computes L_M where M = num_batches * args.batch_size
         def closure():
             total = 0
             for data in first_items:
@@ -153,23 +166,22 @@ def main(args):
                 batchloss = criterion(outputs, x)
                 total += batchloss
 
-            total = n/2 * np.log(2 * np.pi) + 1/2 * total / num_batches
+            total = 1/2 * total / num_batches
             optimizer.zero_grad()
             total.backward()
 
             return total
 
-        # Store the current parameter, since we will be doing SGLD trajectories
-        # starting here, and will need to reset        
+        # Store the current parameter
         param_groups = []
         for group in optimizer.param_groups:
             group_copy = dict()
             group_copy["params"] = deepcopy(group["params"])
             param_groups.append(group_copy)
         
-        num_iter = 100 # default 100
-        gamma = 1000 # default 1000
-        epsilon = 0.1 / 10000 # default 0.1 / 10000
+        num_iter = 100
+        gamma = 1000
+        epsilon = 0.1 / 10000
         Lms = []
 
         def reset_chain():
@@ -179,35 +191,58 @@ def main(args):
                     w = param_groups[group_index]["params"][param_index]
                     p.data.copy_(w.data)
 
+        # SGLD is from M. Welling, Y. W. Teh "Bayesian Learning via Stochastic Gradient Langevin Dynamics"
+        # We use equation (4) there, which says given n samples x_1, ... , x_N (here w = (W,b))
+        #
+        #  w' - w = epsilon_t / 2 ( \grad logp(w) - N \grad L_N(w) ) + eta_t
+        #
+        # where eta_t is Gaussian noise, sampled from N(0, \epsilon_t), and p(w) is a prior. We take
+        # this to be Gaussian centered at some fixed w_0 parameter, with covariance matrix Sigma = 1/gamma I_d.
+        #
+        #   p(w) = (2pi)^{-d/2}gamma^{k/2}exp(-1/2|| w - w_0 ||^2 * gamma)
+        #   \grad logp(w) = \grad( -1/2|| w - w_0 ||^2 * gamma ) = -gamma( w - w_0 ).
+        #
+        # We use a tempered posterior, which means replacing L_N by \beta L_N, at inverse temperature
+        # \beta = 1/logN.
+
+        d = sum(p.numel() for group in optimizer.param_groups for p in group['params'])
+        assert d == m * n + n, "Unexpected dimension of parameter space"
+
         sgld_chains = args.sgld_chains 
         for _ in range(sgld_chains):
             # This outer loop is over SGLD chains, starting at the current optimiser.param
             for _ in range(num_iter):
                 with torch.enable_grad():
-                    # computes L_m (including gradients)
+                    # evaluate L_M at the current point of the SGLD chain (including gradients)
                     loss = closure()
 
                 for group_index, group in enumerate(optimizer.param_groups):
                     for param_index, w_prime in enumerate(group["params"]):
-                        w = param_groups[group_index]["params"][param_index]
-                        # by using the scaling below of w_prime.grad, we are ensuring the SGLD is for full batch posterior at inverse temp 1/log n
+                        # Center of the prior p(w)
+                        w0 = param_groups[group_index]["params"][param_index]
+
+                        # - \beta N \grad L_N(w) with L_M(w) as a surrogate for L_N(w)
                         dx_prime = -w_prime.grad.data / np.log(total_train) * total_train
-                        dx_prime.add_(w_prime.data - w.data, alpha=-gamma)
+
+                        # \grad logp(w) - N \grad L_N(w)
+                        dx_prime.add_(w_prime.data - w0.data, alpha=-gamma)
+
+                        # w' = epsilon_t / 2 ( \grad logp(w) - N \grad L_N(w) )
                         w_prime.data.add_(dx_prime, alpha=epsilon / 2)
                         gaussian_noise = torch.empty_like(w_prime)
                         gaussian_noise.normal_()
+
+                        # w' = epsilon_t / 2 ( \grad logp(w) - N \grad L_N(w) ) + eta_t
                         w_prime.data.add_(gaussian_noise, alpha=(np.sqrt(epsilon)))
 
                 Lms.append(loss)
             
             reset_chain()
 
-        # E_w[ L_m ] where the expectation over the posterior is approximated by SGLD
+        # E_w^\beta[ L_M ] where the expectation over the posterior is approximated by SGLD
         Ew_Lm = sum(Lms) / len(Lms) 
 
-        # N E_w[ L_m ] where N is the training set size, as a surrogate for
-        # N E_w[ L_N ] = E_w[ N L_N ] which by the WBIC Theorem is the free energy
-        # at temperature log(N)
+        # N E_w^\beta[ L_M ]
         local_free_energy = total_train * Ew_Lm 
 
         reset_chain()
