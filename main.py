@@ -28,10 +28,11 @@ def parse_commandline():
     parser.add_argument("--max_stat_batches", help="When giving polygon stats, range of batches", type=int, default=10)
     parser.add_argument("--hatlambdas", help="Number of hatlambdas to compute", type=int, default=20)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
+    parser.add_argument("--sigma", help="Standard deviation of input distribution", type=float, default=10)
     return parser
 
 class ToyModelsDataset(torch.utils.data.Dataset):
-    def __init__(self, num_samples, n):
+    def __init__(self, num_samples, n, sigma):
         self.num_samples = num_samples
         self.n = n
         self.data = []
@@ -45,8 +46,12 @@ class ToyModelsDataset(torch.utils.data.Dataset):
             x = torch.zeros(self.n)
             x[a - 1] = lambda_val
 
+            gaussian_noise = torch.empty_like(x)
+            gaussian_noise.normal_(mean=0,std=np.sqrt(sigma))
+            y = x + gaussian_noise
+
             self.data.append(x)
-            self.targets.append(x.clone())  # In this case, the target is the same as the input
+            self.targets.append(y)
 
     def __len__(self):
         return self.num_samples
@@ -100,6 +105,7 @@ def main(args):
     num_epochs = args.epochs
     init_polygon = args.init_polygon
     lr_init = args.lr
+    sigma = args.sigma
 
     steps_per_epoch = 128
     decay_factor = 1
@@ -117,47 +123,56 @@ def main(args):
 
     # Our model is p(y|x,w) where x, y \in R^n and
     #
-    #       p(y|x,w) = 1/(2pi)^{n/2} exp(-1/2|| y - ReLU(W^TWx + b) ||^2)
+    #       C = sigma * (2pi)^{n/2}
+    #       p(y|x,w) = 1/C exp(-1/(2sigma^2)|| y - ReLU(W^TWx + b) ||^2)
     #       p(x,y|w) = p(y|x,w)p(x)
     #
-    # Hence the empirical negative log loss is (n being args.n)
+    # Hence the empirical negative log loss of a sample {x_1, ... , x_k} is (n being args.n)
     #
     #       L_k(w) = -1/k \sum_{i=1}^k log p(y_i,x_i|w)
     #              = -1/k \sum_{i=1}^k ( logp(y_i|x_i,w) + logp(x_i) )
-    #              = n/2 log(2pi) - 1/k \sum_{i=1}^k logp(y_i|x_i,w) - 1/k \sum_{i=1}^k logp(x_i)
+    #              = logC - 1/k \sum_{i=1}^k logp(y_i|x_i,w) - 1/k \sum_{i=1}^k logp(x_i)
+    #              = logC + L'_k(w) + S_n
     #
-    # We define the normalised negative log loss to be L'_k(w) = -1/k \sum_{i=1}^k logp(y_i|x_i,w)
-    # That is, 
+    # Where L'_k(w) = -1/k \sum_{i=1}^k logp(y_i|x_i,w) and S_n is empirical entropy. That is, 
     #
-    #       L'_k(w) = 1/k \sum_{i=1}^k 1/2|| y - ReLU(W^TWx + b ) ||^2
+    #       L'_k(w) = 1/k \sum_{i=1}^k 1/(2sigma^2)|| y - ReLU(W^TWx + b ) ||^2
     #
-    # Note that in computing the difference between log losses, the terms omitted by L' cancel
+    # Note that in computing the difference between log losses, the other terms cancel
     # out and can be ignored
     #
     #  E_w^\beta[ NL_N(w) ] - NL_N(w_0) = E_w^\beta[ NL'_N ] - NL'_N(w_0)
     #
-    # Hence in the following we use L' instead of L, and just denote the former L (sorry!)
+    # Hence in the following we use L' instead of L.
+
+    # NOTE, replacing L_N by L_M invalidates this idea, since the entropy of p(x) is different
+    # but this is a relatively small error (since it gets divided by logN in the hat lambda)
+
+    # NOTE: We are not using the right true distribution, since our q(x) std is 1
+
+    # NOTE: we can try scaling the number of SGLD steps with logn
+
+    # NOTE: There is also a problem that as N grows, but M remains fixed, the gap may be bigger
     
-    # Computes NL_N where N is the training set size
+    # Computes NL'_N where N is the training set size
     def compute_energy(trainloader, model, criterion):   
         energies = []
         with torch.no_grad():
             for data in trainloader:
                 x = data[0].to(device)
                 outputs = model(x)
-                batchloss = 1/2 * criterion(outputs, x) * args.batch_size
+                batchloss = criterion(outputs, x) * args.batch_size
 
-                # batchloss is the sum over a batch of 1/2|| y - ReLU(W^TWx + b) ||^2
                 energies.append(batchloss)
 
-        total_energy = sum(energies)
+        total_energy = sum(energies) / ( 2 * sigma ** 2)
         return total_energy
     
     def compute_local_free_energy(trainloader, model, criterion, optimizer, num_batches=1):
         dataiter = iter(trainloader)
         first_items = list(itertools.islice(dataiter, num_batches))
         
-        # Computes L_M where M = num_batches * args.batch_size
+        # Computes L'_M where M = num_batches * args.batch_size
         def closure():
             total = 0
             for data in first_items:
@@ -166,7 +181,7 @@ def main(args):
                 batchloss = criterion(outputs, x)
                 total += batchloss
 
-            total = 1/2 * total / num_batches
+            total = total / (2 * num_batches * sigma ** 2)
             optimizer.zero_grad()
             total.backward()
 
@@ -179,7 +194,7 @@ def main(args):
             group_copy["params"] = deepcopy(group["params"])
             param_groups.append(group_copy)
         
-        num_iter = 100
+        num_iter = 100 # int(100 * np.log(total_train)/np.log(2000))
         gamma = 1000
         epsilon = 0.1 / 10000
         Lms = []
@@ -194,15 +209,15 @@ def main(args):
         # SGLD is from M. Welling, Y. W. Teh "Bayesian Learning via Stochastic Gradient Langevin Dynamics"
         # We use equation (4) there, which says given n samples x_1, ... , x_N (here w = (W,b))
         #
-        #  w' - w = epsilon_t / 2 ( \grad logp(w) - N \grad L_N(w) ) + eta_t
+        #  w' - w = epsilon_t / 2 ( \grad logp(w) - N \grad L'_N(w) ) + eta_t
         #
         # where eta_t is Gaussian noise, sampled from N(0, \epsilon_t), and p(w) is a prior. We take
-        # this to be Gaussian centered at some fixed w_0 parameter, with covariance matrix Sigma = 1/gamma I_d.
+        # this to be Gaussian centered at some fixed w_0 parameter, with covariance matrix 1/gamma I_d.
         #
-        #   p(w) = (2pi)^{-d/2}gamma^{k/2}exp(-1/2|| w - w_0 ||^2 * gamma)
+        #   p(w) proportional to exp(-1/2|| w - w_0 ||^2 * gamma)
         #   \grad logp(w) = \grad( -1/2|| w - w_0 ||^2 * gamma ) = -gamma( w - w_0 ).
         #
-        # We use a tempered posterior, which means replacing L_N by \beta L_N, at inverse temperature
+        # We use a tempered posterior, which means replacing L'_N by \beta L'_N, at inverse temperature
         # \beta = 1/logN.
 
         d = sum(p.numel() for group in optimizer.param_groups for p in group['params'])
@@ -213,7 +228,7 @@ def main(args):
             # This outer loop is over SGLD chains, starting at the current optimiser.param
             for _ in range(num_iter):
                 with torch.enable_grad():
-                    # evaluate L_M at the current point of the SGLD chain (including gradients)
+                    # evaluate L'_M at the current point of the SGLD chain (including gradients)
                     loss = closure()
 
                 for group_index, group in enumerate(optimizer.param_groups):
@@ -221,28 +236,28 @@ def main(args):
                         # Center of the prior p(w)
                         w0 = param_groups[group_index]["params"][param_index]
 
-                        # - \beta N \grad L_N(w) with L_M(w) as a surrogate for L_N(w)
+                        # - \beta N \grad L'_N(w) with L'_M(w) as a surrogate for L'_N(w)
                         dx_prime = -w_prime.grad.data / np.log(total_train) * total_train
 
-                        # \grad logp(w) - N \grad L_N(w)
+                        # \grad logp(w) - N \grad L'_N(w)
                         dx_prime.add_(w_prime.data - w0.data, alpha=-gamma)
 
-                        # w' = epsilon_t / 2 ( \grad logp(w) - N \grad L_N(w) )
+                        # w' = epsilon_t / 2 ( \grad logp(w) - N \grad L'_N(w) )
                         w_prime.data.add_(dx_prime, alpha=epsilon / 2)
                         gaussian_noise = torch.empty_like(w_prime)
                         gaussian_noise.normal_()
 
-                        # w' = epsilon_t / 2 ( \grad logp(w) - N \grad L_N(w) ) + eta_t
+                        # w' = epsilon_t / 2 ( \grad logp(w) - N \grad L'_N(w) ) + eta_t
                         w_prime.data.add_(gaussian_noise, alpha=(np.sqrt(epsilon)))
 
                 Lms.append(loss)
             
             reset_chain()
 
-        # E_w^\beta[ L_M ] where the expectation over the posterior is approximated by SGLD
+        # E_w^\beta[ L'_M ] where the expectation over the posterior is approximated by SGLD
         Ew_Lm = sum(Lms) / len(Lms) 
 
-        # N E_w^\beta[ L_M ]
+        # N E_w^\beta[ L'_M ]
         local_free_energy = total_train * Ew_Lm 
 
         reset_chain()
@@ -251,7 +266,7 @@ def main(args):
     
     # The training set is allocated at the beginning using the custom dataset
     total_train = steps_per_epoch * num_epochs
-    trainset = ToyModelsDataset(total_train, n)
+    trainset = ToyModelsDataset(total_train, n, sigma)
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=1, shuffle=True)
     trainloader_batched = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
     lr = lr_init
@@ -302,7 +317,7 @@ def main(args):
             ax2.grid(axis='y', alpha=0.3)
             ax2.set_ylabel('Hat lambda')
 
-            plt.suptitle(f"Sensitivity to num_batches, epochs={num_epochs}, m={m}, n={n}")
+            plt.suptitle(f"Sensitivity to num_batches, epochs={num_epochs}, m={m}, n={n}, sigma={sigma}")
             plt.show()
 
         return
