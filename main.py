@@ -28,11 +28,11 @@ def parse_commandline():
     parser.add_argument("--max_stat_batches", help="When giving polygon stats, range of batches", type=int, default=10)
     parser.add_argument("--hatlambdas", help="Number of hatlambdas to compute", type=int, default=20)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
-    parser.add_argument("--sigma", help="Standard deviation of input distribution", type=float, default=10)
+    parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=1)
     return parser
 
 class ToyModelsDataset(torch.utils.data.Dataset):
-    def __init__(self, num_samples, n, sigma):
+    def __init__(self, num_samples, n, gamma):
         self.num_samples = num_samples
         self.n = n
         self.data = []
@@ -47,7 +47,7 @@ class ToyModelsDataset(torch.utils.data.Dataset):
             x[a - 1] = lambda_val
 
             gaussian_noise = torch.empty_like(x)
-            gaussian_noise.normal_(mean=0,std=np.sqrt(sigma))
+            gaussian_noise.normal_(mean=0,std=1/np.sqrt(gamma))
             y = x + gaussian_noise
 
             self.data.append(x)
@@ -105,8 +105,8 @@ def main(args):
     num_epochs = args.epochs
     init_polygon = args.init_polygon
     lr_init = args.lr
-    sigma = args.sigma
-
+    truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
+    
     steps_per_epoch = 128
     decay_factor = 1
     num_plots = 5
@@ -121,7 +121,7 @@ def main(args):
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
     print(f"Device: {device}")
 
-    # Our model is p(y|x,w) where x, y \in R^n and
+    # Our model is p(y|x,w) where x, y \in R^n and sigma = 1/sqrt(truth_gamma)
     #
     #       C = sigma * (2pi)^{n/2}
     #       p(y|x,w) = 1/C exp(-1/(2sigma^2)|| y - ReLU(W^TWx + b) ||^2)
@@ -136,7 +136,7 @@ def main(args):
     #
     # Where L'_k(w) = -1/k \sum_{i=1}^k logp(y_i|x_i,w) and S_n is empirical entropy. That is, 
     #
-    #       L'_k(w) = 1/k \sum_{i=1}^k 1/(2sigma^2)|| y - ReLU(W^TWx + b ) ||^2
+    #       L'_k(w) = truth_gamma/2 1/k \sum_{i=1}^k || y - ReLU(W^TWx + b ) ||^2
     #
     # Note that in computing the difference between log losses, the other terms cancel
     # out and can be ignored
@@ -145,14 +145,11 @@ def main(args):
     #
     # Hence in the following we use L' instead of L.
 
-    # NOTE, replacing L_N by L_M invalidates this idea, since the entropy of p(x) is different
-    # but this is a relatively small error (since it gets divided by logN in the hat lambda)
-
-    # NOTE: We are not using the right true distribution, since our q(x) std is 1
-
     # NOTE: we can try scaling the number of SGLD steps with logn
 
     # NOTE: There is also a problem that as N grows, but M remains fixed, the gap may be bigger
+
+    # Per dataset variability is unexamined so far
     
     # Computes NL'_N where N is the training set size
     def compute_energy(trainloader, model, criterion):   
@@ -165,7 +162,7 @@ def main(args):
 
                 energies.append(batchloss)
 
-        total_energy = sum(energies) / ( 2 * sigma ** 2)
+        total_energy = sum(energies) * truth_gamma / 2
         return total_energy
     
     def compute_local_free_energy(trainloader, model, criterion, optimizer, num_batches=1):
@@ -181,7 +178,7 @@ def main(args):
                 batchloss = criterion(outputs, x)
                 total += batchloss
 
-            total = total / (2 * num_batches * sigma ** 2)
+            total = (total * truth_gamma) / (2 * num_batches)
             optimizer.zero_grad()
             total.backward()
 
@@ -266,7 +263,7 @@ def main(args):
     
     # The training set is allocated at the beginning using the custom dataset
     total_train = steps_per_epoch * num_epochs
-    trainset = ToyModelsDataset(total_train, n, sigma)
+    trainset = ToyModelsDataset(total_train, n, truth_gamma)
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=1, shuffle=True)
     trainloader_batched = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
     lr = lr_init
@@ -317,7 +314,7 @@ def main(args):
             ax2.grid(axis='y', alpha=0.3)
             ax2.set_ylabel('Hat lambda')
 
-            plt.suptitle(f"Sensitivity to num_batches, epochs={num_epochs}, m={m}, n={n}, sigma={sigma}")
+            plt.suptitle(f"Sensitivity to num_batches, epochs={num_epochs}, m={m}, n={n}, truth_gamma={truth_gamma}")
             plt.show()
 
         return
