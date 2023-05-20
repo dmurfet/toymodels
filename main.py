@@ -29,7 +29,7 @@ def parse_commandline():
     parser.add_argument("--max_stat_batches", help="When giving polygon stats, range of batches", type=int, default=10)
     parser.add_argument("--hatlambdas", help="Number of hatlambdas to compute", type=int, default=20)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
-    parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=1)
+    parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=10)
     return parser
 
 def main(args):
@@ -117,7 +117,7 @@ def main(args):
 
         epoch_loss = epoch_loss / steps_per_epoch
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 100 == 0:
             print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.5f}')
 
         loss_history.append(epoch_loss)
