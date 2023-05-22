@@ -33,6 +33,7 @@ def parse_commandline():
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
     parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=10)
     parser.add_argument("--max_loss_plot", help="Maximum on y axis for loss plot", type=float, default=None)
+    parser.add_argument("--no_bias", help="Use no bias in the model", action="store_true")
     return parser
 
 def main(args):
@@ -42,7 +43,8 @@ def main(args):
     init_polygon = args.init_polygon
     lr_init = args.lr
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
-    
+    no_bias = args.no_bias
+
     steps_per_epoch = 128
     decay_factor = 1
     num_plots = 5
@@ -50,9 +52,8 @@ def main(args):
     plot_interval = (num_epochs - first_snapshot_epoch) // (num_plots - 1)
     decay_interval = 2 * plot_interval
     smoothing_window = num_epochs // 100
-    show_lfe = True
 
-    print(f"SLT Toy Model m={m},n={n}")
+    print(f"SLT Toy Model m={m},n={n}{', No bias' if no_bias else ''}")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
     print(f"Device: {device}")
@@ -68,7 +69,7 @@ def main(args):
     criterion = nn.MSELoss()
 
     # The main model for training
-    model = ToyModelsNet(n, m, init_config=init_polygon, noise_scale=0.1)
+    model = ToyModelsNet(n, m, init_config=init_polygon, noise_scale=0.1, use_bias=not no_bias, use_optimal=True)
     model.to(device)
     optimizer = optim.SGD(model.parameters(), lr=lr)
 
@@ -115,7 +116,7 @@ def main(args):
             W_history.append(model.W.cpu().detach().clone())
             b_history.append(model.b.cpu().detach().clone())
 
-        if show_lfe and epoch > first_snapshot_epoch and (epoch + 1) % (num_epochs // args.hatlambdas) == 0:
+        if epoch > first_snapshot_epoch and (epoch + 1) % (num_epochs // args.hatlambdas) == 0:
             lfe_epochs.append(epoch+1)
             energy = machine.compute_energy()
             lfe = machine.compute_local_free_energy(num_batches=20)
@@ -142,26 +143,27 @@ def main(args):
     
     num_plots = len(W_history)
 
-    # Plot columns of W matrices
-    if show_lfe:
+    if not no_bias:
         plot_rows = 5
         plot_ratios = [2,1,1,2,2]
-        plot_height = 55
     else:
         plot_rows = 4
-        plot_ratios = [2,1,1,2]
-        plot_height = 45
+        plot_ratios = [2,1,2,2]
 
+    plot_height = 55
+    
     gs = gridspec.GridSpec(plot_rows, num_plots, height_ratios=plot_ratios)
     fig = plt.figure(figsize=(35, plot_height))
-    fig.suptitle(f"Toy models (n={n}, m={m}, lr={lr_init}, init_polygon={args.init_polygon or 'None'})", fontsize=10)
+    fig.suptitle(f"Toy models (n={n}, m={m}, init_polygon={args.init_polygon or 'None'}{', No bias' if no_bias else ''})", fontsize=10)
     if m == 2:
         axes1 = [fig.add_subplot(gs[0, i]) for i in range(num_plots)]
     elif m == 3:
         axes1 = [fig.add_subplot(gs[0,i], projection='3d') for i in range(num_plots)]
 
     axes2 = [fig.add_subplot(gs[1, i]) for i in range(num_plots)]
-    axes3 = [fig.add_subplot(gs[2, i]) for i in range(num_plots)]
+
+    if not no_bias:
+        axes3 = [fig.add_subplot(gs[2, i]) for i in range(num_plots)]
 
     for i, W in enumerate(W_history):
         for j in range(n):
@@ -209,32 +211,33 @@ def main(args):
         axes2[i].set_xticks(np.arange(0, 2.1, 0.5))
         axes2[i].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
 
-    for i, b in enumerate(b_history):
-        biases = b.cpu().numpy()
+    if not no_bias:
+        for i, b in enumerate(b_history):
+            biases = b.cpu().numpy()
 
-        # Plot the distribution of column norms
-        axes3[i].hist(biases, bins=np.linspace(-2, 0.5, num=21), alpha=0.75, range=(-2,0.5))
-        if i == 0:
-            axes3[i].set_ylabel('b')
-            axes3[i].tick_params(axis='x', labelsize=8)
-        else:
-            axes3[i].set_xticklabels([])
-        
-        axes3[i].set_xlim(-2, 0.5)
-        axes3[i].set_xticks(np.arange(-2, 0.6, 0.5))
-        axes3[i].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+            # Plot the distribution of biases
+            axes3[i].hist(biases, bins=np.linspace(-2, 0.5, num=21), alpha=0.75, range=(-2,0.5))
+            if i == 0:
+                axes3[i].set_ylabel('b')
+                axes3[i].tick_params(axis='x', labelsize=8)
+            else:
+                axes3[i].set_xticklabels([])
+            
+            axes3[i].set_xlim(-2, 0.5)
+            axes3[i].set_xticks(np.arange(-2, 0.6, 0.5))
+            axes3[i].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
 
     # Calculate frame potential for each W in W_history
-    def fp(W):
-        W = W / torch.norm(W, dim=0, keepdim=True)
-        out = torch.matmul(W.T, W)
-        out = torch.norm(out, p='fro').item() ** 2 - (n**2)/m
-        return out
+    #def fp(W):
+    #    W = W / torch.norm(W, dim=0, keepdim=True)
+    #    out = torch.matmul(W.T, W)
+    #    out = torch.norm(out, p='fro').item() ** 2 - (n**2)/m
+    #    return out
 
     #fp_loss = [fp(W) for W in W_history]
 
     # Set up the subplot for the loss function
-    axes4 = fig.add_subplot(gs[3, :])
+    axes4 = fig.add_subplot(gs[3 if not no_bias else 2, :])
     rolling_loss = np.convolve(loss_history, np.ones(smoothing_window)/smoothing_window, mode='valid')
     rolling_variance = np.array([np.var(loss_history[i - smoothing_window//2 : i + smoothing_window//2]) 
                                 for i in range(smoothing_window//2, len(loss_history) - smoothing_window//2 + 1)])
@@ -254,7 +257,7 @@ def main(args):
     axes4.set_ylabel('Losses')
 
     if not args.max_loss_plot:
-        rolling_loss_max = energy_history[0] / total_train + 0.01
+        rolling_loss_max = energy_history[0] / total_train + 0.03
     else:
         rolling_loss_max = args.max_loss_plot
 
@@ -264,21 +267,20 @@ def main(args):
     axes4.legend(loc='upper right')
 
     # Set up the subplot for lfe, energy and hatlambda
-    if show_lfe:
-        axes5 = fig.add_subplot(gs[4, :])
+    axes5 = fig.add_subplot(gs[4 if not no_bias else 3, :])
 
-        axes5.plot(lfe_epochs, lfe_history, "--o", label="lfe")
-        axes5.plot(lfe_epochs, energy_history, color='g', marker='o', label="energy")
-        axes5.legend(loc='lower left')
-        axes5_hatlambda = axes5.twinx()
-        axes5_hatlambda.plot(lfe_epochs, hatlambda_history, color='r', marker='x', alpha=0.3, label="hatlambda")
-        axes5_hatlambda.legend(loc='lower right')
+    axes5.plot(lfe_epochs, lfe_history, "--o", label="lfe")
+    axes5.plot(lfe_epochs, energy_history, color='g', marker='o', label="energy")
+    axes5.legend(loc='lower left')
+    axes5_hatlambda = axes5.twinx()
+    axes5_hatlambda.plot(lfe_epochs, hatlambda_history, color='r', marker='x', alpha=0.3, label="hatlambda")
+    axes5_hatlambda.legend(loc='lower right')
 
-        axes5.set_xlabel('Epoch')
-        axes5.set_ylabel('Energies')
-        axes5.set_xlim([0, max(snapshot_epoch) + 20])
-        axes5_hatlambda.set_ylabel('Hat lambda')
-        axes5.grid(axis='y', alpha=0.3)
+    axes5.set_xlabel('Epoch')
+    axes5.set_ylabel('Energies')
+    axes5.set_xlim([0, max(snapshot_epoch) + 20])
+    axes5_hatlambda.set_ylabel('Hat lambda')
+    axes5.grid(axis='y', alpha=0.3)
 
     plt.show()
 

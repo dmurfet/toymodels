@@ -19,6 +19,11 @@ from itertools import cycle
 from toymodels import ToyModelsDataset, ToyModelsNet
 from slt import LearningMachine
 
+# TODO
+#
+#   - Collect statistics at actual local minima
+#   - Automatic mapping of phase transitions
+
 def parse_commandline():
     parser = argparse.ArgumentParser(description="SLT Toy Model")
     parser.add_argument("--batch_size", help="Batch size", type=int, default=512)
@@ -30,6 +35,7 @@ def parse_commandline():
     parser.add_argument("--max_stat_batches", help="When giving polygon stats, range of batches", type=int, default=10)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
     parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=10)
+    parser.add_argument("--no_bias", help="Use no bias in the model", action="store_true")
     return parser
 
 def show_lfe_hatlambda_vs_numbatches(args):
@@ -37,6 +43,7 @@ def show_lfe_hatlambda_vs_numbatches(args):
     num_epochs = args.epochs
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
     steps_per_epoch = 128
+    no_bias = args.no_bias
     
     print(f"SLT Toy Model m={m},n={n}")
 
@@ -56,7 +63,7 @@ def show_lfe_hatlambda_vs_numbatches(args):
 
     # Print the energies of polygons with current trainset
     for k in range(2, n+1):
-        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0)
+        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0, use_bias=not no_bias)
         polygon_model.to(device)
         optimizer = optim.SGD(polygon_model.parameters(), lr=lr)
 
@@ -122,14 +129,16 @@ def main(args):
     steps_per_epoch = 128
     num_batches = 20 # number of batches to use in computing L_m in lfe
     lr = args.lr
+    no_bias = args.no_bias
 
-    print(f"SLT Toy Model m={m},n={n}")
+    print(f"SLT Toy Model stats m={m},n={n}{', No bias' if no_bias else ''}")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
     print(f"Device: {device}")
     criterion = nn.MSELoss()
 
-    epochs = [10000, 12000, 14000, 16000, 18000, 20000]
+    #epochs = [10000, 12000, 14000, 16000, 18000, 20000]
+    epochs = [6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000, 20000]
 
     print("Generating datasets:")
     trainsets = []
@@ -144,7 +153,7 @@ def main(args):
     
     for k in range(2, n+1):
         print(f"{k}-gon")
-        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0)
+        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0, use_optimal=True, use_bias=not no_bias)
         polygon_model.to(device)
         optimizer = optim.SGD(polygon_model.parameters(), lr=lr)
         
@@ -180,6 +189,9 @@ def main(args):
     def func(x, a, b):
         return a * x / np.log(x) + b
     
+    def func_lin(x, a, b):
+        return a * x + b
+    
     def fef(N, E, rlct):
         return N * E + rlct * np.log(N)
 
@@ -193,8 +205,13 @@ def main(args):
     for k in range(2, n+1):
         # Fit a function a x/logx + b to these data points
         popt, _ = curve_fit(func, dataset_sizes, hatlambdas[k-2])
+        popt_lin, _ = curve_fit(func_lin, dataset_sizes, hatlambdas[k-2])
+
         predicted = [func(dsize, *popt) for dsize in dataset_sizes]
         r2 = r2_score(hatlambdas[k-2], predicted)
+
+        predicted_lin = [func_lin(dsize, *popt_lin) for dsize in dataset_sizes]
+        r2_lin = r2_score(hatlambdas[k-2], predicted_lin)
 
         # We have now fitted the LHS
         #
@@ -202,16 +219,16 @@ def main(args):
         #
         # which means that
         #
-        #   a ~ L_N(w_0) - L_N(w^*)
+        #   a ~ L'_N(w_0) - L'_N(w^*)
         #   b ~ lambda
         #
         # where w^* is our chosen parameter (the init_config) and w_0 is the
         # hypothesised nearby local optimum. We can therefore compute#
         #
-        #   L_N(w_0) = a + L_N(w^*)
+        #   L'_N(w_0) = a + L'_N(w^*)
         #
-        # We are assuming L_N(w_0) - L_N(w^*) is roughly constant in N, and
-        # we take the latest energy in training for L_N(w^*)
+        # We are assuming L'_N(w_0) - L'_N(w^*) is roughly constant in N, and
+        # we take the latest energy in training for L'_N(w^*)
 
         final_N = epochs[-1] * steps_per_epoch
         optimum_energy_per_sample = popt[0] + 1/final_N * energies[k-2][-1] # NL'_N(w_0)
@@ -229,6 +246,7 @@ def main(args):
         ax2.plot(intermediate_epochs, predicted_lfes, "--", color=color)
 
         print(f"{k}-gon, fitted a = {popt[0]:.6f}, b = {popt[1]:.6f}, R2 = {r2:.6f}, optimum per-sample energy = {optimum_energy_per_sample:.6f}")
+        print(f"  linear fitted a = {popt[0]:.6f}, b = {popt[1]:.6f}, R2 = {r2_lin:.6f}")
 
     ax1.legend(loc='lower left')
     ax2.legend(loc='lower right')

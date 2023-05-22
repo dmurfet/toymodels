@@ -32,18 +32,37 @@ class ToyModelsDataset(torch.utils.data.Dataset):
         return self.data[idx], self.targets[idx]
     
 class ToyModelsNet(nn.Module):
-    def __init__(self, in_features, out_features, init_config=None, noise_scale=1):
+    def __init__(self, in_features, out_features, init_config=None, noise_scale=1, use_optimal=False, use_bias=True):
         super(ToyModelsNet, self).__init__()
-        
+
+        self.use_bias = use_bias
+
         if init_config:
             assert in_features >= init_config, "Not enough columns in W"
 
             # Populate W with a sequence of columns, first being (1,0,...)
             # and then the remainder being rotated by 2 * pi * i / n for i = 0, ... , k - 1
             # and then zeros, where k = init_config
-            self.b = nn.Parameter(torch.zeros(in_features) + noise_scale * torch.randn(in_features))
+            length = 1
+            bias = 0
+
+            # If asked, we use the optimal length for some configurations (see SLT29)
+            # NOTE: we only use these optimal configurations for the "top" k-gon
+            if use_optimal and in_features == init_config and out_features == 2 and (init_config >= 5) and (init_config <= 7):
+                if init_config == 5:
+                    length = 1.1138
+                    bias = -0.204094
+                elif init_config == 6:
+                    length = 1.09155
+                    bias = -0.271845
+                elif init_config == 7:
+                    length = np.sqrt( 1 / (1 + 2 * np.cos(2 * np.pi/init_config) ** 2) )
+                    
+                print(f"Using length {length:.6f}")
+
+            b = torch.ones(in_features) * bias + noise_scale * torch.randn(in_features)
             W = torch.zeros((out_features, in_features))
-            W[0, 0] = 1
+            W[0, 0] = length
 
             theta = 2 * np.pi / init_config
             rotation_matrix = torch.tensor([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]], dtype=torch.float)
@@ -57,10 +76,18 @@ class ToyModelsNet(nn.Module):
                     W[:, i] += noise_scale * torch.randn_like(W[:, i])
 
             self.W = nn.Parameter(W)
+
+            if self.use_bias:
+                self.b = nn.Parameter(b)
+            else:
+                self.b = torch.zeros(in_features)
         else:
             # Random W and b
             self.W = nn.Parameter(noise_scale * torch.randn(out_features, in_features))
-            self.b = nn.Parameter(noise_scale * torch.randn(in_features))
+            if self.use_bias:
+                self.b = nn.Parameter(noise_scale * torch.randn(in_features))
+            else:
+                self.b = torch.zeros(in_features)
 
     def forward(self, x):
         # compute ReLU(W^TWx + b)
