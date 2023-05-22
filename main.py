@@ -1,3 +1,5 @@
+# Example usage
+# python main.py --m 2 --n 5 --epochs 20000 --max_loss_plot 0.06
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,21 +17,22 @@ import argparse
 from toymodels import ToyModelsDataset, ToyModelsNet
 from slt import LearningMachine
 
+# TODO
+#   - Plot test loss
+
 def parse_commandline():
     parser = argparse.ArgumentParser(description="SLT Toy Model")
     parser.add_argument("--batch_size", help="Batch size", type=int, default=512)
     parser.add_argument("--m", help="Number of hidden dimensions", type=int, default=2)
     parser.add_argument("--n", help="Number of input dimensions", type=int, default=5)
     parser.add_argument("--epochs", help="epochs", type=int, default=6000)
-    parser.add_argument("--show", help="plt.show() if specified.", action="store_true")
     parser.add_argument("--sgld_chains", help="Number of SGLD chains to average over during posterior estimates", type=int, default=5)
-    parser.add_argument("--init_polygon", help="Initial weight matrix", type=int, default=2)
+    parser.add_argument("--init_polygon", help="Initial weight matrix", type=int, default=None)
     parser.add_argument("--lr", help="Initial learning rate", type=float, default=1e-3)
-    parser.add_argument("--polygon_stats", help="Prints only energy and entropy stats for polygons", action="store_true")
-    parser.add_argument("--max_stat_batches", help="When giving polygon stats, range of batches", type=int, default=10)
     parser.add_argument("--hatlambdas", help="Number of hatlambdas to compute", type=int, default=20)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
     parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=10)
+    parser.add_argument("--max_loss_plot", help="Maximum on y axis for loss plot", type=float, default=None)
     return parser
 
 def main(args):
@@ -57,8 +60,10 @@ def main(args):
     # The training set is allocated at the beginning using the custom dataset
     total_train = steps_per_epoch * num_epochs
     trainset = ToyModelsDataset(total_train, n, truth_gamma)
+    #testset = ToyModelsDataset(total_train // 6, n, truth_gamma)
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=1, shuffle=True)
     trainloader_batched = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
+    #testloader_batched = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=True)
     lr = lr_init
     criterion = nn.MSELoss()
 
@@ -78,6 +83,7 @@ def main(args):
     lfe_history = []
     energy_history = []
     hatlambda_history = []
+    testloss_history = []
 
     # Training loop
     dataiter = iter(trainloader)
@@ -91,6 +97,10 @@ def main(args):
             # Forward pass
             output = model(x)
             loss = criterion(output, x)
+
+            # (see slt.py)
+            # L'_k(w) = truth_gamma/2 1/k \sum_{i=1}^k || y - ReLU(W^TWx + b ) ||^2
+            loss = loss * truth_gamma / 2
 
             # Backward pass
             optimizer.zero_grad()
@@ -108,7 +118,7 @@ def main(args):
         if show_lfe and epoch > first_snapshot_epoch and (epoch + 1) % (num_epochs // args.hatlambdas) == 0:
             lfe_epochs.append(epoch+1)
             energy = machine.compute_energy()
-            lfe = machine.compute_local_free_energy()
+            lfe = machine.compute_local_free_energy(num_batches=20)
             hatlambda = (lfe - energy) / np.log(total_train)
 
             energy_history.append(energy.cpu().detach().clone())
@@ -144,7 +154,7 @@ def main(args):
 
     gs = gridspec.GridSpec(plot_rows, num_plots, height_ratios=plot_ratios)
     fig = plt.figure(figsize=(35, plot_height))
-    fig.suptitle(f"Toy models (n={n}, m={m}, lr={lr_init})", fontsize=10)
+    fig.suptitle(f"Toy models (n={n}, m={m}, lr={lr_init}, init_polygon={args.init_polygon or 'None'})", fontsize=10)
     if m == 2:
         axes1 = [fig.add_subplot(gs[0, i]) for i in range(num_plots)]
     elif m == 3:
@@ -221,7 +231,7 @@ def main(args):
         out = torch.norm(out, p='fro').item() ** 2 - (n**2)/m
         return out
 
-    fp_loss = [fp(W) for W in W_history]
+    #fp_loss = [fp(W) for W in W_history]
 
     # Set up the subplot for the loss function
     axes4 = fig.add_subplot(gs[3, :])
@@ -232,21 +242,26 @@ def main(args):
     lower_band = rolling_loss - np.sqrt(rolling_variance)
 
     loss_plot_range = range(smoothing_window//2, len(rolling_loss)+smoothing_window//2)
-    axes4.plot(loss_plot_range, rolling_loss, label="loss")
+    axes4.plot(loss_plot_range, rolling_loss, label="training loss")
     axes4.fill_between(loss_plot_range, lower_band, upper_band, color='gray', alpha=0.1)
 
-    axes4_frob = axes4.twinx()
-    axes4_frob.plot(snapshot_epoch, fp_loss, color='g', marker='o', alpha=0.3, label="FP")
+    #axes4_frob = axes4.twinx()
+    #axes4_frob.plot(snapshot_epoch, fp_loss, color='g', marker='o', alpha=0.3, label="FP")
+    #axes4_frob.set_ylabel('FP (green)')
 
     axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o')
     axes4.set_xticklabels([])
-    axes4.set_ylabel('Loss (batch=1)')
-    axes4_frob.set_ylabel('FP (green)')
-    rolling_loss_max = energy_history[0] / total_train + 0.01
+    axes4.set_ylabel('Losses')
+
+    if not args.max_loss_plot:
+        rolling_loss_max = energy_history[0] / total_train + 0.01
+    else:
+        rolling_loss_max = args.max_loss_plot
+
     axes4.set_ylim([0, rolling_loss_max])
     axes4.set_xlim([0, max(snapshot_epoch) + 20])
     axes4.grid(axis='y', alpha=0.3)
-    axes4.legend(loc='lower left')
+    axes4.legend(loc='upper right')
 
     # Set up the subplot for lfe, energy and hatlambda
     if show_lfe:
@@ -256,7 +271,8 @@ def main(args):
         axes5.plot(lfe_epochs, energy_history, color='g', marker='o', label="energy")
         axes5.legend(loc='lower left')
         axes5_hatlambda = axes5.twinx()
-        axes5_hatlambda.plot(lfe_epochs, hatlambda_history, color='r', marker='x', alpha=0.3)
+        axes5_hatlambda.plot(lfe_epochs, hatlambda_history, color='r', marker='x', alpha=0.3, label="hatlambda")
+        axes5_hatlambda.legend(loc='lower right')
 
         axes5.set_xlabel('Epoch')
         axes5.set_ylabel('Energies')
