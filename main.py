@@ -46,11 +46,9 @@ def main(args):
     no_bias = args.no_bias
 
     steps_per_epoch = 128
-    decay_factor = 1
     num_plots = 5
     first_snapshot_epoch = 250
     plot_interval = (num_epochs - first_snapshot_epoch) // (num_plots - 1)
-    decay_interval = 2 * plot_interval
     smoothing_window = num_epochs // 100
 
     print(f"SLT Toy Model m={m},n={n}{', No bias' if no_bias else ''}")
@@ -80,12 +78,17 @@ def main(args):
     b_history = []
     loss_history = []
     snapshot_epoch = []
-    lfe_epochs = []
+    stat_epochs = []
     lfe_history = []
     energy_history = []
     hatlambda_history = []
+    dims_per_feature = []
     testloss_history = []
 
+    def dim_per_feature(W):
+        out = W.size(0) / torch.linalg.matrix_norm(W) ** 2
+        return out
+    
     # Training loop
     dataiter = iter(trainloader)
     for epoch in range(num_epochs):
@@ -117,7 +120,8 @@ def main(args):
             b_history.append(model.b.cpu().detach().clone())
 
         if epoch > first_snapshot_epoch and (epoch + 1) % (num_epochs // args.hatlambdas) == 0:
-            lfe_epochs.append(epoch+1)
+            stat_epochs.append(epoch+1)
+            dims_per_feature.append(dim_per_feature(model.W).cpu().detach().clone())
             energy = machine.compute_energy()
             lfe = machine.compute_local_free_energy(num_batches=20)
             hatlambda = (lfe - energy) / np.log(total_train)
@@ -132,11 +136,6 @@ def main(args):
             print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.5f}')
 
         loss_history.append(epoch_loss)
-
-        if (epoch - first_snapshot_epoch + 1) % decay_interval == 0:
-            lr = lr * decay_factor
-            if decay_factor != 1:
-                print(f'New learning rate: {lr:.5f}')
 
     ####################
     # Plotting
@@ -227,15 +226,6 @@ def main(args):
             axes3[i].set_xticks(np.arange(-2, 0.6, 0.5))
             axes3[i].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
 
-    # Calculate frame potential for each W in W_history
-    #def fp(W):
-    #    W = W / torch.norm(W, dim=0, keepdim=True)
-    #    out = torch.matmul(W.T, W)
-    #    out = torch.norm(out, p='fro').item() ** 2 - (n**2)/m
-    #    return out
-
-    #fp_loss = [fp(W) for W in W_history]
-
     # Set up the subplot for the loss function
     axes4 = fig.add_subplot(gs[3 if not no_bias else 2, :])
     rolling_loss = np.convolve(loss_history, np.ones(smoothing_window)/smoothing_window, mode='valid')
@@ -248,16 +238,16 @@ def main(args):
     axes4.plot(loss_plot_range, rolling_loss, label="training loss")
     axes4.fill_between(loss_plot_range, lower_band, upper_band, color='gray', alpha=0.1)
 
-    #axes4_frob = axes4.twinx()
-    #axes4_frob.plot(snapshot_epoch, fp_loss, color='g', marker='o', alpha=0.3, label="FP")
-    #axes4_frob.set_ylabel('FP (green)')
+    axes4_frob = axes4.twinx()
+    axes4_frob.plot(stat_epochs, dims_per_feature, color='g', marker='o', alpha=0.3, label="Dims per feature")
+    axes4_frob.set_ylabel('Dims per feature')
 
     axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o')
     axes4.set_xticklabels([])
     axes4.set_ylabel('Losses')
 
     if not args.max_loss_plot:
-        rolling_loss_max = energy_history[0] / total_train + 0.03
+        rolling_loss_max = energy_history[0] / total_train + 0.04
     else:
         rolling_loss_max = args.max_loss_plot
 
@@ -265,15 +255,16 @@ def main(args):
     axes4.set_xlim([0, max(snapshot_epoch) + 20])
     axes4.grid(axis='y', alpha=0.3)
     axes4.legend(loc='upper right')
+    
 
     # Set up the subplot for lfe, energy and hatlambda
     axes5 = fig.add_subplot(gs[4 if not no_bias else 3, :])
 
-    axes5.plot(lfe_epochs, lfe_history, "--o", label="lfe")
-    axes5.plot(lfe_epochs, energy_history, color='g', marker='o', label="energy")
+    axes5.plot(stat_epochs, lfe_history, "--o", label="lfe")
+    axes5.plot(stat_epochs, energy_history, color='g', marker='o', label="energy")
     axes5.legend(loc='lower left')
     axes5_hatlambda = axes5.twinx()
-    axes5_hatlambda.plot(lfe_epochs, hatlambda_history, color='r', marker='x', alpha=0.3, label="hatlambda")
+    axes5_hatlambda.plot(stat_epochs, hatlambda_history, color='r', marker='x', alpha=0.3, label="hatlambda")
     axes5_hatlambda.legend(loc='lower right')
 
     axes5.set_xlabel('Epoch')

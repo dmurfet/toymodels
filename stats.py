@@ -5,6 +5,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import Subset
 import matplotlib
 import platform
 if platform.system() == 'Darwin':
@@ -31,7 +32,7 @@ def parse_commandline():
     parser.add_argument("--n", help="Number of input dimensions", type=int, default=5)
     parser.add_argument("--epochs", help="epochs", type=int, default=6000)
     parser.add_argument("--lr", help="Initial learning rate", type=float, default=1e-3)
-    parser.add_argument("--sgld_chains", help="Number of SGLD chains to average over during posterior estimates", type=int, default=5)
+    parser.add_argument("--sgld_chains", help="Number of SGLD chains to average over during posterior estimates", type=int, default=200)
     parser.add_argument("--max_stat_batches", help="When giving polygon stats, range of batches", type=int, default=10)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
     parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=10)
@@ -67,6 +68,22 @@ def show_lfe_hatlambda_vs_numbatches(args):
         polygon_model.to(device)
         optimizer = optim.SGD(polygon_model.parameters(), lr=lr)
 
+        # Burn-in to get a nearby critical point (ideally)
+        dataiter = iter(trainloader_batched)
+        for _ in range(100):
+            data = next(dataiter)
+            x = data[0].to(device)
+            
+            # Forward pass
+            output = polygon_model(x)
+            loss = criterion(output, x)
+
+            loss = loss * truth_gamma / 2
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
         machine = LearningMachine(polygon_model, trainloader_batched, criterion, optimizer, device, truth_gamma, args.sgld_chains)
     
         energy = machine.compute_energy()
@@ -84,7 +101,7 @@ def show_lfe_hatlambda_vs_numbatches(args):
         hatlambdas.append(hatlambdas_per_polygon)
         lfes.append(lfes_per_polygon)
 
-        print(f"[{k}-gon] energy per sample: {avg_energy:.6f}, hatlambda: {hatlambda:.6f}")
+        print(f"[{k}-gon] energy per sample: {avg_energy:.4f}, hatlambda: {hatlambda:.4f}")
 
     if len(batch_sizes) > 1:
         fig = plt.figure(figsize=(25, 20))
@@ -130,39 +147,90 @@ def main(args):
     num_batches = 20 # number of batches to use in computing L_m in lfe
     lr = args.lr
     no_bias = args.no_bias
+    steps_per_epoch = 128
 
     print(f"SLT Toy Model stats m={m},n={n}{', No bias' if no_bias else ''}")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
-    print(f"Device: {device}")
+    print(f"  [Device: {device}]")
     criterion = nn.MSELoss()
 
-    #epochs = [10000, 12000, 14000, 16000, 18000, 20000]
-    epochs = [6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000, 14000, 15000, 16000, 17000, 18000, 19000, 20000]
+    #epochs = [10000, 12000, 14000]
+    epochs = [6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000]
 
-    print("Generating datasets:")
-    trainsets = []
-    for num_epochs in epochs:
-        print(f"   num_epochs={num_epochs}")
-        trainset = ToyModelsDataset(steps_per_epoch * num_epochs, n, truth_gamma)
-        trainsets.append(trainset)
-
+    print("  [Generating dataset]")
+    total_trainset = ToyModelsDataset(steps_per_epoch * max(epochs), n, truth_gamma)
+    
     hatlambdas = []
     energies = []
     lfes = []
     
-    for k in range(2, n+1):
+    min_polygon = 4
+    for k in range(min_polygon, n+1):
         print(f"{k}-gon")
-        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0, use_optimal=True, use_bias=not no_bias)
+        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0.01, use_optimal=True, use_bias=not no_bias)
         polygon_model.to(device)
         optimizer = optim.SGD(polygon_model.parameters(), lr=lr)
         
+        # Burn-in to get a nearby critical point (ideally)
+        print(f"  [Burning in]")
+        trainloader_tune = torch.utils.data.DataLoader(total_trainset, batch_size=1, shuffle=True)    
+        dataiter = iter(trainloader_tune)
+        num_tune_epochs = 3000
+        pretune_loss = None
+        tune_lr = lr
+        for i in range(num_tune_epochs):
+            epoch_loss = 0.0
+            total_gradient_norm = 0.0
+
+            # Reduce the learning rate
+            if (i+1) % (num_tune_epochs // 3) == 0:
+                tune_lr = tune_lr * 0.5
+                print(f"    [reducing lr {tune_lr}]")
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = tune_lr
+
+            for _ in range(steps_per_epoch):
+                data = next(dataiter)
+                x = data[0].to(device)
+                
+                # Forward pass
+                output = polygon_model(x)
+                loss = criterion(output, x)
+
+                loss = loss * truth_gamma / 2
+
+                optimizer.zero_grad()
+                loss.backward()
+
+                # Compute gradient norm
+                for param in polygon_model.parameters():
+                    if param.grad is not None:
+                        total_gradient_norm += param.grad.data.norm(2).item()
+
+                optimizer.step()
+                epoch_loss += loss.item()
+            
+            avg_gradient_norm = total_gradient_norm / steps_per_epoch
+    
+            if i == 0:
+                pretune_loss = epoch_loss / steps_per_epoch
+        
+        print(f"    [final grad norm {avg_gradient_norm:.4f}]")
+        print(f"    [loss decrease {pretune_loss - epoch_loss / steps_per_epoch:.4f}]")
+
+        # Reset the optimizer
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
         hatlambdas_per = []
         energies_per = []
         lfes_per = []
 
         for i, num_epochs in enumerate(epochs):
-            trainset = trainsets[i]
+            # TODO: Consider taking a random subset?
+            subset_indices = list(range(steps_per_epoch * num_epochs))
+            trainset = Subset(total_trainset, subset_indices)
             trainloader_batched = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)    
             
             machine = LearningMachine(polygon_model, trainloader_batched, criterion, optimizer, device, truth_gamma, args.sgld_chains)
@@ -177,7 +245,7 @@ def main(args):
             lfes_per.append(lfe.cpu().detach().clone())
 
             energy_per_sample = energy / (steps_per_epoch * num_epochs)
-            print(f"  [{k}-gon/num_epochs {num_epochs}] energy per sample: {energy_per_sample:.6f}, hatlambda: {hatlambda:.6f}")
+            print(f"  [{num_epochs}] energy per sample: {energy_per_sample:.6f}, hatlambda: {hatlambda:.6f}")
 
         hatlambdas.append(hatlambdas_per)
         energies.append(energies_per)
@@ -189,8 +257,10 @@ def main(args):
     def func(x, a, b):
         return a * x / np.log(x) + b
     
-    def func_lin(x, a, b):
-        return a * x + b
+    #def func_lin(x, a, b):
+    #    return a * x + b
+    def func_lfe(x, a, b):
+        return a * x + b * np.log(x)
     
     def fef(N, E, rlct):
         return N * E + rlct * np.log(N)
@@ -202,16 +272,20 @@ def main(args):
     intermediate_epochs = np.linspace(min(epochs), max(epochs), 1000)  # 1000 is the number of points
     
     print("\n")
-    for k in range(2, n+1):
-        # Fit a function a x/logx + b to these data points
-        popt, _ = curve_fit(func, dataset_sizes, hatlambdas[k-2])
-        popt_lin, _ = curve_fit(func_lin, dataset_sizes, hatlambdas[k-2])
+    for k in range(min_polygon, n+1):
+        hatlambda_data = hatlambdas[k-min_polygon]
+        lfe_data = lfes[k-min_polygon]
+
+        # Fit a function a x/logx + b to the hatlambda data points
+        popt, _ = curve_fit(func, dataset_sizes, hatlambda_data)
+        popt_lfe, _ = curve_fit(func_lfe, dataset_sizes, lfe_data)
+        #popt_lin, _ = curve_fit(func_lin, dataset_sizes, hatlambda_data)
 
         predicted = [func(dsize, *popt) for dsize in dataset_sizes]
-        r2 = r2_score(hatlambdas[k-2], predicted)
+        r2 = r2_score(hatlambda_data, predicted)
 
-        predicted_lin = [func_lin(dsize, *popt_lin) for dsize in dataset_sizes]
-        r2_lin = r2_score(hatlambdas[k-2], predicted_lin)
+        predicted_lfe = [func_lfe(dsize, *popt_lfe) for dsize in dataset_sizes]
+        r2_lfe = r2_score(lfe_data, predicted_lfe)
 
         # We have now fitted the LHS
         #
@@ -231,7 +305,7 @@ def main(args):
         # we take the latest energy in training for L'_N(w^*)
 
         final_N = epochs[-1] * steps_per_epoch
-        optimum_energy_per_sample = popt[0] + 1/final_N * energies[k-2][-1] # NL'_N(w_0)
+        optimum_energy_per_sample = popt[0] + 1/final_N * energies[k-min_polygon][-1] # NL'_N(w_0)
         estimated_rlct = popt[1]
 
         b_values[k] = popt[1]
@@ -240,13 +314,15 @@ def main(args):
         predicted_lfes = [fef(epoch * steps_per_epoch, optimum_energy_per_sample, estimated_rlct) for epoch in intermediate_epochs]
 
         color = next(colors)
-        ax1.plot(epochs, hatlambdas[k-2], 'o', color=color, label=f"{k}-gon")
+        ax1.plot(epochs, hatlambda_data, 'o', color=color, label=f"{k}-gon")
         ax1.plot(intermediate_epochs, predicted, "--", color=color)
-        ax2.plot(epochs, lfes[k-2], 'o', color=color, label=f"{k}-gon")
+        ax2.plot(epochs, lfe_data, 'o', color=color, label=f"{k}-gon")
         ax2.plot(intermediate_epochs, predicted_lfes, "--", color=color)
 
-        print(f"{k}-gon, fitted a = {popt[0]:.6f}, b = {popt[1]:.6f}, R2 = {r2:.6f}, optimum per-sample energy = {optimum_energy_per_sample:.6f}")
-        print(f"  linear fitted a = {popt[0]:.6f}, b = {popt[1]:.6f}, R2 = {r2_lin:.6f}")
+        print(f"{k}-gon")
+        print(f"  hatlambda slope = {popt[0]:.4f},  lambda = {popt[1]:.4f},     R2 = {r2:.4f},     optimum per-sample energy = {optimum_energy_per_sample:.5f}")
+        print(f"  lfe fitted E = {popt_lfe[0]:.6f}, lambda = {popt_lfe[1]:.6f}, R2 = {r2_lfe:.6f}")
+        print(f"  avg hatlamda={sum(hatlambda_data)/len(hatlambda_data):.4f}")
 
     ax1.legend(loc='lower left')
     ax2.legend(loc='lower right')
@@ -259,7 +335,7 @@ def main(args):
     ax1.grid(axis='y', alpha=0.3)
     ax2.grid(axis='y', alpha=0.3)
 
-    plt.suptitle(f"Hatlambda against dataset size, m={m}, n={n}, num_batches={num_batches}, truth_gamma={truth_gamma}")
+    plt.suptitle(f"Hatlambda against dataset size, m={m}, n={n}, sgld_chains={args.sgld_chains}, truth_gamma={truth_gamma}, single dataset")
 
     # Create a table of b values
     #ax1.table(cellText=list(b_values.items()), colLabels=['k', 'lambda'], cellLoc = 'center', loc='bottom')

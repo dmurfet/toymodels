@@ -58,7 +58,7 @@ class ToyModelsNet(nn.Module):
                 elif init_config == 7:
                     length = np.sqrt( 1 / (1 + 2 * np.cos(2 * np.pi/init_config) ** 2) )
                     
-                print(f"Using length {length:.6f}")
+                #print(f"Using length {length:.6f}")
 
             b = torch.ones(in_features) * bias + noise_scale * torch.randn(in_features)
             W = torch.zeros((out_features, in_features))
@@ -88,6 +88,7 @@ class ToyModelsNet(nn.Module):
                 self.b = nn.Parameter(noise_scale * torch.randn(in_features))
             else:
                 self.b = torch.zeros(in_features)
+
 
     def forward(self, x):
         # compute ReLU(W^TWx + b)
