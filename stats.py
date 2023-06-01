@@ -36,7 +36,6 @@ def parse_commandline():
     parser.add_argument("--max_stat_batches", help="When giving polygon stats, range of batches", type=int, default=10)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
     parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=10)
-    parser.add_argument("--no_bias", help="Use no bias in the model", action="store_true")
     return parser
 
 def show_lfe_hatlambda_vs_numbatches(args):
@@ -44,7 +43,6 @@ def show_lfe_hatlambda_vs_numbatches(args):
     num_epochs = args.epochs
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
     steps_per_epoch = 128
-    no_bias = args.no_bias
     
     print(f"SLT Toy Model m={m},n={n}")
 
@@ -64,7 +62,7 @@ def show_lfe_hatlambda_vs_numbatches(args):
 
     # Print the energies of polygons with current trainset
     for k in range(2, n+1):
-        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0, use_bias=not no_bias)
+        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0)
         polygon_model.to(device)
         optimizer = optim.SGD(polygon_model.parameters(), lr=lr)
 
@@ -144,19 +142,17 @@ def main(args):
     m, n = args.m, args.n
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
     steps_per_epoch = 128
-    num_batches = 20 # number of batches to use in computing L_m in lfe
     lr = args.lr
-    no_bias = args.no_bias
     steps_per_epoch = 128
 
-    print(f"SLT Toy Model stats m={m},n={n}{', No bias' if no_bias else ''}")
+    print(f"SLT Toy Model stats m={m},n={n}")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
     print(f"  [Device: {device}]")
     criterion = nn.MSELoss()
 
-    #epochs = [10000, 12000, 14000]
-    epochs = [6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000]
+    epochs = [6000, 8000]
+    #epochs = [6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000]
 
     print("  [Generating dataset]")
     total_trainset = ToyModelsDataset(steps_per_epoch * max(epochs), n, truth_gamma)
@@ -168,7 +164,7 @@ def main(args):
     min_polygon = 4
     for k in range(min_polygon, n+1):
         print(f"{k}-gon")
-        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0.01, use_optimal=True, use_bias=not no_bias)
+        polygon_model = ToyModelsNet(n, m, init_config=k, noise_scale=0.01, use_optimal=True)
         polygon_model.to(device)
         optimizer = optim.SGD(polygon_model.parameters(), lr=lr)
         
@@ -237,7 +233,7 @@ def main(args):
         
             # N = steps_per_epoch * num_epochs
             energy = machine.compute_energy() # NL'_N            
-            lfe = machine.compute_local_free_energy(num_batches=num_batches) # N E_w^\beta[ L'_M ] ~ N E_w^beta[ L'_N ]
+            lfe = machine.compute_local_free_energy() # N E_w^\beta[ L'_M ] ~ N E_w^beta[ L'_N ]
             hatlambda = (lfe - energy) / np.log(steps_per_epoch * num_epochs)
 
             hatlambdas_per.append(hatlambda.cpu().detach().clone())

@@ -47,10 +47,11 @@ class LearningMachine(object):
         self.total_train = len(self.trainloader.dataset) 
 
     # Computes NL'_N where N is the training set size
-    def compute_energy(self):   
+    def compute_energy(self,dataset=None):
+        dataset = dataset or self.trainloader
         energies = []
         with torch.no_grad():
-            for data in self.trainloader:
+            for data in dataset:
                 x = data[0].to(self.device)
                 outputs = self.net(x)
                 batch_size = x.size(0)
@@ -63,8 +64,9 @@ class LearningMachine(object):
 
     # Computes N E_w^\beta[ L'_M ] with L'_M as a surrogate for L'_N and 
     # with SGLD performing the posterior integral
-    def compute_local_free_energy(self, num_batches=1):
-        dataiter = iter(self.trainloader)
+    def compute_local_free_energy(self, num_batches=20, dataset=None):
+        dataset = dataset or self.trainloader
+        dataiter = iter(dataset)
         first_items = list(itertools.islice(dataiter, num_batches))
         
         # Computes L'_M where M = num_batches * args.batch_size

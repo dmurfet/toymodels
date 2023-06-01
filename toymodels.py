@@ -32,10 +32,8 @@ class ToyModelsDataset(torch.utils.data.Dataset):
         return self.data[idx], self.targets[idx]
     
 class ToyModelsNet(nn.Module):
-    def __init__(self, in_features, out_features, init_config=None, noise_scale=1, use_optimal=False, use_bias=True):
+    def __init__(self, in_features, out_features, init_config=None, noise_scale=1, use_optimal=False):
         super(ToyModelsNet, self).__init__()
-
-        self.use_bias = use_bias
 
         if init_config:
             assert in_features >= init_config, "Not enough columns in W"
@@ -73,22 +71,16 @@ class ToyModelsNet(nn.Module):
                 if i < init_config:
                     rotated_col = torch.matmul(rotation_matrix, rotated_col)
                     W[:2, i] = rotated_col
-                    W[:, i] += noise_scale * torch.randn_like(W[:, i])
+                
+                # Add noise to all the columns
+                W[:, i] += noise_scale * torch.randn_like(W[:, i])
 
             self.W = nn.Parameter(W)
-
-            if self.use_bias:
-                self.b = nn.Parameter(b)
-            else:
-                self.b = torch.zeros(in_features)
+            self.b = nn.Parameter(b)
         else:
             # Random W and b
             self.W = nn.Parameter(noise_scale * torch.randn(out_features, in_features))
-            if self.use_bias:
-                self.b = nn.Parameter(noise_scale * torch.randn(in_features))
-            else:
-                self.b = torch.zeros(in_features)
-
+            self.b = nn.Parameter(noise_scale * torch.randn(in_features))
 
     def forward(self, x):
         # compute ReLU(W^TWx + b)
