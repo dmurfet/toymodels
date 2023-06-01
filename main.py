@@ -13,6 +13,8 @@ import numpy as np
 import matplotlib.ticker as ticker
 from copy import deepcopy
 import argparse
+import os
+import re
 
 from toymodels import ToyModelsDataset, ToyModelsNet
 from slt import LearningMachine
@@ -28,12 +30,19 @@ def parse_commandline():
     parser.add_argument("--epochs", help="epochs", type=int, default=6000)
     parser.add_argument("--sgld_chains", help="Number of SGLD chains to average over during posterior estimates", type=int, default=5)
     parser.add_argument("--init_polygon", help="Initial weight matrix", type=int, default=None)
+    parser.add_argument("--init_noise_scale", help="Initial weight matrix noise scale", type=float, default=0.1)
     parser.add_argument("--lr", help="Initial learning rate", type=float, default=1e-3)
     parser.add_argument("--hatlambdas", help="Number of hatlambdas to compute", type=int, default=20)
     parser.add_argument("--gpu", help="Use GPU, off by default", action="store_true")
     parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=10)
     parser.add_argument("--max_loss_plot", help="Maximum on y axis for loss plot", type=float, default=None)
-    parser.add_argument("--no_bias", help="Use no bias in the model", action="store_true")
+    parser.add_argument("--save_plot", help="Save the resulting plot", action="store_true")
+    parser.add_argument(
+        "--outputdir",
+        help="Path to output directory. Create if not exist.",
+        type=str,
+        default=None,
+    )
     return parser
 
 def main(args):
@@ -43,7 +52,6 @@ def main(args):
     init_polygon = args.init_polygon
     lr_init = args.lr
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
-    no_bias = args.no_bias
 
     steps_per_epoch = 128
     num_plots = 5
@@ -51,7 +59,7 @@ def main(args):
     plot_interval = (num_epochs - first_snapshot_epoch) // (num_plots - 1)
     smoothing_window = num_epochs // 100
 
-    print(f"SLT Toy Model m={m},n={n}{', No bias' if no_bias else ''}")
+    print(f"SLT Toy Model m={m},n={n}")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
     print(f"Device: {device}")
@@ -67,7 +75,7 @@ def main(args):
     criterion = nn.MSELoss()
 
     # The main model for training
-    model = ToyModelsNet(n, m, init_config=init_polygon, noise_scale=0.1, use_bias=not no_bias, use_optimal=True)
+    model = ToyModelsNet(n, m, init_config=init_polygon, noise_scale=args.init_noise_scale, use_optimal=True)
     model.to(device)
     optimizer = optim.SGD(model.parameters(), lr=lr)
 
@@ -86,7 +94,7 @@ def main(args):
     testloss_history = []
 
     def dim_per_feature(W):
-        out = W.size(0) / torch.linalg.matrix_norm(W) ** 2
+        out = W.size(0) / (torch.linalg.matrix_norm(W) ** 2)
         return out
     
     # Training loop
@@ -122,8 +130,9 @@ def main(args):
         if epoch > first_snapshot_epoch and (epoch + 1) % (num_epochs // args.hatlambdas) == 0:
             stat_epochs.append(epoch+1)
             dims_per_feature.append(dim_per_feature(model.W).cpu().detach().clone())
+
             energy = machine.compute_energy()
-            lfe = machine.compute_local_free_energy(num_batches=20)
+            lfe = machine.compute_local_free_energy()
             hatlambda = (lfe - energy) / np.log(total_train)
 
             energy_history.append(energy.cpu().detach().clone())
@@ -142,18 +151,14 @@ def main(args):
     
     num_plots = len(W_history)
 
-    if not no_bias:
-        plot_rows = 5
-        plot_ratios = [2,1,1,2,2]
-    else:
-        plot_rows = 4
-        plot_ratios = [2,1,2,2]
+    plot_rows = 5
+    plot_ratios = [2,1,1,2,2]
 
     plot_height = 55
     
     gs = gridspec.GridSpec(plot_rows, num_plots, height_ratios=plot_ratios)
     fig = plt.figure(figsize=(35, plot_height))
-    fig.suptitle(f"Toy models (n={n}, m={m}, init_polygon={args.init_polygon or 'None'}{', No bias' if no_bias else ''})", fontsize=10)
+    fig.suptitle(f"Toy models (n={n}, m={m}, init_polygon={args.init_polygon or 'None'})", fontsize=10)
     if m == 2:
         axes1 = [fig.add_subplot(gs[0, i]) for i in range(num_plots)]
     elif m == 3:
@@ -161,8 +166,7 @@ def main(args):
 
     axes2 = [fig.add_subplot(gs[1, i]) for i in range(num_plots)]
 
-    if not no_bias:
-        axes3 = [fig.add_subplot(gs[2, i]) for i in range(num_plots)]
+    axes3 = [fig.add_subplot(gs[2, i]) for i in range(num_plots)]
 
     for i, W in enumerate(W_history):
         for j in range(n):
@@ -210,24 +214,23 @@ def main(args):
         axes2[i].set_xticks(np.arange(0, 2.1, 0.5))
         axes2[i].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
 
-    if not no_bias:
-        for i, b in enumerate(b_history):
-            biases = b.cpu().numpy()
+    for i, b in enumerate(b_history):
+        biases = b.cpu().numpy()
 
-            # Plot the distribution of biases
-            axes3[i].hist(biases, bins=np.linspace(-2, 0.5, num=21), alpha=0.75, range=(-2,0.5))
-            if i == 0:
-                axes3[i].set_ylabel('b')
-                axes3[i].tick_params(axis='x', labelsize=8)
-            else:
-                axes3[i].set_xticklabels([])
-            
-            axes3[i].set_xlim(-2, 0.5)
-            axes3[i].set_xticks(np.arange(-2, 0.6, 0.5))
-            axes3[i].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+        # Plot the distribution of biases
+        axes3[i].hist(biases, bins=np.linspace(-2, 0.5, num=21), alpha=0.75, range=(-2,0.5))
+        if i == 0:
+            axes3[i].set_ylabel('b')
+            axes3[i].tick_params(axis='x', labelsize=8)
+        else:
+            axes3[i].set_xticklabels([])
+        
+        axes3[i].set_xlim(-2, 0.5)
+        axes3[i].set_xticks(np.arange(-2, 0.6, 0.5))
+        axes3[i].yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
 
     # Set up the subplot for the loss function
-    axes4 = fig.add_subplot(gs[3 if not no_bias else 2, :])
+    axes4 = fig.add_subplot(gs[3, :])
     rolling_loss = np.convolve(loss_history, np.ones(smoothing_window)/smoothing_window, mode='valid')
     rolling_variance = np.array([np.var(loss_history[i - smoothing_window//2 : i + smoothing_window//2]) 
                                 for i in range(smoothing_window//2, len(loss_history) - smoothing_window//2 + 1)])
@@ -256,9 +259,8 @@ def main(args):
     axes4.grid(axis='y', alpha=0.3)
     axes4.legend(loc='upper right')
     
-
     # Set up the subplot for lfe, energy and hatlambda
-    axes5 = fig.add_subplot(gs[4 if not no_bias else 3, :])
+    axes5 = fig.add_subplot(gs[4, :])
 
     axes5.plot(stat_epochs, lfe_history, "--o", label="lfe")
     axes5.plot(stat_epochs, energy_history, color='g', marker='o', label="energy")
@@ -273,7 +275,29 @@ def main(args):
     axes5_hatlambda.set_ylabel('Hat lambda')
     axes5.grid(axis='y', alpha=0.3)
 
+    def _get_save_filepath(outputdir):
+        max_num = 0
+        name = f"m{m}n{n}"
+        for filename in os.listdir(outputdir):
+            match = re.match(name + r'_(\d+)\.png', filename)
+            if match is not None:
+                num = int(match.group(1))
+                if num > max_num:
+                    max_num = num
+
+        filepath = os.path.join(outputdir, name + f"_{max_num + 1}")
+        print(f"Filepath constructed: {filepath}")
+        return filepath
+
+    if args.save_plot and args.outputdir:
+        outputdir = os.path.join(args.outputdir, f"m{m}n{n}")
+        os.makedirs(outputdir, exist_ok=True)
+        fig.savefig(_get_save_filepath(outputdir))
+
     plt.show()
+
+    #if args.save_model:
+    #    torch.save(net.state_dict(), _get_save_filepath("model.pth"))
 
 if __name__ == "__main__":
     args = parse_commandline().parse_args()
