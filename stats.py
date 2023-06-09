@@ -151,7 +151,7 @@ def main(args):
     print(f"  [Device: {device}]")
     criterion = nn.MSELoss()
 
-    epochs = [6000, 8000]
+    epochs = [100, 400, 500, 4000, 6000]
     #epochs = [6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000]
 
     print("  [Generating dataset]")

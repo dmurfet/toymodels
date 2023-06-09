@@ -18,7 +18,7 @@ from copy import deepcopy
 #
 # Where L'_k(w) = -1/k \sum_{i=1}^k logp(y_i|x_i,w) and S_n is empirical entropy. That is, 
 #
-#       L'_k(w) = truth_gamma/2 1/k \sum_{i=1}^k || y - ReLU(W^TWx + b ) ||^2
+#       L'_k(w) = truth_gamma/2 1/k \sum_{i=1}^k || y_i - ReLU(W^TWx_i + b ) ||^2
 #
 # Note that in computing the difference between log losses, the other terms cancel
 # out and can be ignored
