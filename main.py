@@ -56,8 +56,9 @@ def main(args):
     num_covariance_checkpoints = 40
     steps_per_epoch = 128
     num_plots = 5
-    first_snapshot_epoch = 250
-    plot_interval = (num_epochs - first_snapshot_epoch) // (num_plots - 1)
+    first_snapshot_epoch = 200
+    assert num_epochs > first_snapshot_epoch + 500, "Number of epochs too small"
+    plot_interval = (num_epochs - first_snapshot_epoch - 500) // (num_plots - 1)
     covariance_interval = (num_epochs - first_snapshot_epoch) // (num_covariance_checkpoints - 1)
     smoothing_window = num_epochs // 100
 
@@ -163,6 +164,7 @@ def main(args):
     num_covariant_chain_steps = 100
     covariance_epochs = []    
     covariance_maxeigenvalues = []
+    covariance_maxeigenvectors = []
 
     def add_gaussian_noise_to_state(model, std=0.01):
         state_dict = model.state_dict()
@@ -217,14 +219,16 @@ def main(args):
         mean_vector = torch.mean(X, dim=0)
         X_centered = X - mean_vector
         cov_matrix = X_centered.t().mm(X_centered) / (X.size(0) - 1)
-
+        
         eigenresult = torch.linalg.eig(cov_matrix)
         eigenvalues = eigenresult.eigenvalues.real
-        max_eigenvalue = torch.max(eigenvalues).item()
+        max_eigenvalue, idx = torch.max(eigenvalues, dim=0)
+        max_eigenvector = eigenresult.eigenvectors[:, idx].real
 
         #print("Eigenvalues:", eigenvalues)  # The eigenvalues are in the first column of the returned tensor
         print("Max eigenvalue:", max_eigenvalue)
         covariance_maxeigenvalues.append(max_eigenvalue)
+        covariance_maxeigenvectors.append(max_eigenvector)
 
     ####################
     # Plotting
@@ -235,6 +239,9 @@ def main(args):
     plot_ratios = [2,1,1,2,2]
 
     plot_height = 55
+    
+    def find_closest_index(target, numbers):
+        return min(enumerate(numbers), key=lambda x: abs(x[1] - target))[0]
     
     gs = gridspec.GridSpec(plot_rows, num_plots, height_ratios=plot_ratios)
     fig = plt.figure(figsize=(35, plot_height))
@@ -249,13 +256,20 @@ def main(args):
     axes3 = [fig.add_subplot(gs[2, i]) for i in range(num_plots)]
 
     for i, W in enumerate(W_history):
+        # Plot the eigenvectors of the covariance matrix
+        nearest_cov_epoch = find_closest_index(snapshot_epoch[i],covariance_epochs)
+        eigenvector = covariance_maxeigenvectors[nearest_cov_epoch]
+        V = eigenvector[:W.numel()].reshape(W.shape).cpu()
+                
         for j in range(n):
             column_vector = W.cpu()[:, j].numpy()
+            V_column_vector = V[:, j].numpy()
 
             # Plot the arrow
             if m == 2:
                 # 2D
                 axes1[i].quiver(0, 0, column_vector[0], column_vector[1], angles='xy', scale_units='xy', scale=1, label=f'Column {j+1}')
+                axes1[i].quiver(column_vector[0], column_vector[1], V_column_vector[0], V_column_vector[1], angles='xy', scale_units='xy', scale=1, color='red')
             elif m == 3:
                 # 3D
                 axes1[i].quiver(0, 0, 0, column_vector[0], column_vector[1], column_vector[2], 
