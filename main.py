@@ -53,10 +53,12 @@ def main(args):
     lr_init = args.lr
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
 
+    num_covariance_checkpoints = 40
     steps_per_epoch = 128
     num_plots = 5
     first_snapshot_epoch = 250
     plot_interval = (num_epochs - first_snapshot_epoch) // (num_plots - 1)
+    covariance_interval = (num_epochs - first_snapshot_epoch) // (num_covariance_checkpoints - 1)
     smoothing_window = num_epochs // 100
 
     print(f"SLT Toy Model m={m},n={n}")
@@ -70,7 +72,6 @@ def main(args):
     #testset = ToyModelsDataset(total_train // 6, n, truth_gamma)
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=1, shuffle=True)
     trainloader_batched = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
-    #testloader_batched = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=True)
     lr = lr_init
     criterion = nn.MSELoss()
 
@@ -91,6 +92,7 @@ def main(args):
     energy_history = []
     hatlambda_history = []
     dims_per_feature = []
+    model_state_history = []
     testloss_history = []
 
     def dim_per_feature(W):
@@ -126,6 +128,13 @@ def main(args):
             snapshot_epoch.append(epoch+1)
             W_history.append(model.W.cpu().detach().clone())
             b_history.append(model.b.cpu().detach().clone())
+        
+        if (epoch - first_snapshot_epoch + 1) % covariance_interval == 0:
+            model_state_history.append({
+                "epoch": epoch,
+                "W": model.W.cpu().detach().clone(),
+                "b": model.b.cpu().detach().clone()
+            })
 
         if epoch > first_snapshot_epoch and (epoch + 1) % (num_epochs // args.hatlambdas) == 0:
             stat_epochs.append(epoch+1)
@@ -145,6 +154,77 @@ def main(args):
             print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {epoch_loss:.5f}')
 
         loss_history.append(epoch_loss)
+
+    ####################
+    # Compute covariance matrices
+    #
+
+    num_trajectories = 200
+    num_covariant_chain_steps = 100
+    covariance_epochs = []    
+    covariance_maxeigenvalues = []
+
+    def add_gaussian_noise_to_state(model, std=0.01):
+        state_dict = model.state_dict()
+        for _, param in state_dict.items():
+            noise = torch.randn_like(param) * std
+            param.add_(noise)  # This adds the noise in-place
+
+        model.load_state_dict(state_dict)
+        return model
+
+    print("Computing covariance matrices")
+    for _, saved_state in enumerate(model_state_history):
+        covariance_epochs.append(saved_state["epoch"])
+        X_list = []
+
+        for i in range(num_trajectories):
+            torch.manual_seed(i)
+            torch.cuda.manual_seed_all(i)
+            
+            # Create a new model and optimizer instance
+            new_model = ToyModelsNet(n, m, init_config=init_polygon, noise_scale=args.init_noise_scale, use_optimal=True)
+            new_model.W.data = saved_state["W"]
+            new_model.b.data = saved_state["b"]
+            #new_model = add_gaussian_noise_to_state(new_model, std=0.01)
+            new_model.to(device)
+            new_optimizer = optim.SGD(new_model.parameters(), lr=lr)
+
+            # Create an independent training set        
+            new_trainset = ToyModelsDataset(num_covariant_chain_steps, n, truth_gamma)
+            new_trainloader = torch.utils.data.DataLoader(new_trainset, batch_size=1, shuffle=True)
+            new_dataiter = iter(new_trainloader)
+
+            for _ in range(num_covariant_chain_steps):
+                data = next(new_dataiter)
+                x = data[0].to(device)
+                
+                # Forward pass
+                output = new_model(x)
+                loss = criterion(output, x)
+                loss = loss * truth_gamma / 2
+
+                # Backward pass
+                new_optimizer.zero_grad()
+                loss.backward()
+                new_optimizer.step()
+
+            W_flat = torch.flatten(new_model.W)
+            combined_vector = torch.cat((W_flat, new_model.b))
+            X_list.append(combined_vector.cpu().detach().clone())
+
+        X = torch.stack(X_list)
+        mean_vector = torch.mean(X, dim=0)
+        X_centered = X - mean_vector
+        cov_matrix = X_centered.t().mm(X_centered) / (X.size(0) - 1)
+
+        eigenresult = torch.linalg.eig(cov_matrix)
+        eigenvalues = eigenresult.eigenvalues.real
+        max_eigenvalue = torch.max(eigenvalues).item()
+
+        #print("Eigenvalues:", eigenvalues)  # The eigenvalues are in the first column of the returned tensor
+        print("Max eigenvalue:", max_eigenvalue)
+        covariance_maxeigenvalues.append(max_eigenvalue)
 
     ####################
     # Plotting
@@ -209,6 +289,7 @@ def main(args):
             axes2[i].tick_params(axis='x', labelsize=8)
         else:
             axes2[i].set_xticklabels([])
+            axes2[i].set_yticklabels([])
         
         axes2[i].set_xlim(0, 2)
         axes2[i].set_xticks(np.arange(0, 2.1, 0.5))
@@ -224,6 +305,7 @@ def main(args):
             axes3[i].tick_params(axis='x', labelsize=8)
         else:
             axes3[i].set_xticklabels([])
+            axes3[i].set_yticklabels([])
         
         axes3[i].set_xlim(-2, 0.5)
         axes3[i].set_xticks(np.arange(-2, 0.6, 0.5))
@@ -241,9 +323,12 @@ def main(args):
     axes4.plot(loss_plot_range, rolling_loss, label="training loss")
     axes4.fill_between(loss_plot_range, lower_band, upper_band, color='gray', alpha=0.1)
 
-    axes4_frob = axes4.twinx()
-    axes4_frob.plot(stat_epochs, dims_per_feature, color='g', marker='o', alpha=0.3, label="Dims per feature")
-    axes4_frob.set_ylabel('Dims per feature')
+    #axes4_frob = axes4.twinx()
+    #axes4_frob.plot(stat_epochs, dims_per_feature, color='g', marker='o', alpha=0.3, label="Dims per feature")
+    #axes4_frob.set_ylabel('Dims per feature')
+    axes4_eigen = axes4.twinx()
+    axes4_eigen.plot(covariance_epochs, covariance_maxeigenvalues, color='g', marker='o', alpha=0.3, label="Max cov eigen")
+    axes4_eigen.set_ylabel('Max cov eigen')
 
     axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o')
     axes4.set_xticklabels([])
@@ -254,7 +339,7 @@ def main(args):
     else:
         rolling_loss_max = args.max_loss_plot
 
-    axes4.set_ylim([0, rolling_loss_max])
+    axes4.set_ylim([np.min(rolling_loss) - 0.02, rolling_loss_max])
     axes4.set_xlim([0, max(snapshot_epoch) + 20])
     axes4.grid(axis='y', alpha=0.3)
     axes4.legend(loc='upper right')

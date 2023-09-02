@@ -22,7 +22,6 @@ from slt import LearningMachine
 
 # TODO
 #
-#   - Collect statistics at actual local minima
 #   - Automatic mapping of phase transitions
 
 def parse_commandline():
