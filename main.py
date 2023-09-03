@@ -54,7 +54,7 @@ def main(args):
     lr_init = args.lr
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
 
-    num_covariance_checkpoints = 40
+    num_covariance_checkpoints = 80
     steps_per_epoch = 128
     num_plots = 5
     first_snapshot_epoch = 200
