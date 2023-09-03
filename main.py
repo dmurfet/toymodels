@@ -57,8 +57,8 @@ def main(args):
     steps_per_epoch = 128
     num_plots = 5
     first_snapshot_epoch = 200
-    assert num_epochs > first_snapshot_epoch + 500, "Number of epochs too small"
-    plot_interval = (num_epochs - first_snapshot_epoch - 500) // (num_plots - 1)
+    assert num_epochs > first_snapshot_epoch, "Number of epochs too small"
+    plot_interval = (num_epochs - first_snapshot_epoch) // (num_plots - 1)
     covariance_interval = (num_epochs - first_snapshot_epoch) // (num_covariance_checkpoints - 1)
     smoothing_window = num_epochs // 100
 
@@ -274,6 +274,7 @@ def main(args):
                 # 3D
                 axes1[i].quiver(0, 0, 0, column_vector[0], column_vector[1], column_vector[2], 
                         color=plt.cm.jet(j/n), linewidth=1.5, label=f'Column {j+1}')
+                axes1[i].quiver(column_vector[0], column_vector[1], column_vector[2], V_column_vector[0], V_column_vector[1], V_column_vector[2], color='red')
         
 
         axes1[i].set_title(f'Epoch {snapshot_epoch[i]}')
@@ -343,6 +344,7 @@ def main(args):
     axes4_eigen = axes4.twinx()
     axes4_eigen.plot(covariance_epochs, covariance_maxeigenvalues, color='g', marker='o', alpha=0.3, label="Max cov eigen")
     axes4_eigen.set_ylabel('Max cov eigen')
+    axes4_eigen.set_yscale('log')
 
     axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o')
     axes4.set_xticklabels([])
