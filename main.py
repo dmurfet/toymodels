@@ -168,6 +168,7 @@ def main(args):
     covariance_maxeigenvectors = []
     covariance_matrices = []
     covariance_meanvectors = []
+    covariance_eigenratios = []
 
     print("")
     print("Computing covariance matrices")
@@ -221,12 +222,16 @@ def main(args):
         max_eigenvector = eigenresult.eigenvectors[:, idx].real
         min_eigenvalue, _ = torch.min(eigenvalues, dim=0)
 
-        print("Max eigenvalue:", max_eigenvalue, " Min eigenvalue:", min_eigenvalue)
+        sorted_eigenvalues, _ = torch.sort(torch.abs(eigenvalues), descending=True)
+        eigen_ratio = sorted_eigenvalues[0] / sorted_eigenvalues[1]
+
+        print("Max eigenvalue:", max_eigenvalue, " Min eigenvalue:", min_eigenvalue, " Eigenratio:", eigen_ratio)
 
         covariance_maxeigenvalues.append(max_eigenvalue)
         covariance_maxeigenvectors.append(max_eigenvector)
         covariance_matrices.append(cov_matrix)
         covariance_meanvectors.append(mean_vector)
+        covariance_eigenratios.append(eigen_ratio)
 
     ####################
     # Plotting
@@ -376,7 +381,7 @@ def main(args):
         axes5_hatlambda.set_ylabel('Hat lambda')
         axes5.grid(axis='y', alpha=0.3)
     else:
-        prominence_cutoff = 1e-3
+        prominence_cutoff = 5e-4
 
         peaks, _ = find_peaks(covariance_maxeigenvalues)
         prominences, _, _ = peak_prominences(covariance_maxeigenvalues, peaks)
@@ -395,13 +400,12 @@ def main(args):
             axes5.grid(axis='y', alpha=0.3)
             axes5.set_ylabel('Lyapunov funcs')
 
-            lya_window_size = 12
+            lya_window_size = 10
             # For each peak, plot a Lyapunov function
             for i, peak in enumerate(peaks):
                 # Put a vertical line in the plot at this transition
                 axes5.axvline(x=covariance_epochs[peak], color='blue', linestyle='--')
 
-                print("Graphing peak: ", peak)
                 C = covariance_matrices[peak]
                 lyapunov = []
 
@@ -413,8 +417,8 @@ def main(args):
                     w_vec = torch.cat((torch.flatten(W), b)) - covariance_meanvectors[peak]
                     l = np.dot(w_vec, np.dot(C, w_vec)) + rolling_loss[covariance_epochs[peak]]
                     lyapunov.append(l)
-                
-                axes5.plot(covariance_epochs[peak-lya_window_size:peak+1], lyapunov, label="transition " + str(i))
+                start_index = max(0, peak-lya_window_size)
+                axes5.plot(covariance_epochs[start_index:peak+1], lyapunov, label="transition " + str(i))
             
             axes5.legend(loc='upper right')
 
