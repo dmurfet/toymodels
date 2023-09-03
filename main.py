@@ -14,6 +14,7 @@ import matplotlib.ticker as ticker
 from copy import deepcopy
 import argparse
 import os
+from scipy.signal import find_peaks, peak_prominences
 import re
 
 from toymodels import ToyModelsDataset, ToyModelsNet
@@ -165,16 +166,10 @@ def main(args):
     covariance_epochs = []    
     covariance_maxeigenvalues = []
     covariance_maxeigenvectors = []
+    covariance_matrices = []
+    covariance_meanvectors = []
 
-    def add_gaussian_noise_to_state(model, std=0.01):
-        state_dict = model.state_dict()
-        for _, param in state_dict.items():
-            noise = torch.randn_like(param) * std
-            param.add_(noise)  # This adds the noise in-place
-
-        model.load_state_dict(state_dict)
-        return model
-
+    print("")
     print("Computing covariance matrices")
     for _, saved_state in enumerate(model_state_history):
         covariance_epochs.append(saved_state["epoch"])
@@ -224,11 +219,14 @@ def main(args):
         eigenvalues = eigenresult.eigenvalues.real
         max_eigenvalue, idx = torch.max(eigenvalues, dim=0)
         max_eigenvector = eigenresult.eigenvectors[:, idx].real
+        min_eigenvalue, _ = torch.min(eigenvalues, dim=0)
 
-        #print("Eigenvalues:", eigenvalues)  # The eigenvalues are in the first column of the returned tensor
-        print("Max eigenvalue:", max_eigenvalue)
+        print("Max eigenvalue:", max_eigenvalue, " Min eigenvalue:", min_eigenvalue)
+
         covariance_maxeigenvalues.append(max_eigenvalue)
         covariance_maxeigenvectors.append(max_eigenvector)
+        covariance_matrices.append(cov_matrix)
+        covariance_meanvectors.append(mean_vector)
 
     ####################
     # Plotting
@@ -361,20 +359,64 @@ def main(args):
     axes4.legend(loc='upper right')
     
     # Set up the subplot for lfe, energy and hatlambda
-    axes5 = fig.add_subplot(gs[4, :])
+    use_hatlambda_plot = False
+    if use_hatlambda_plot:
+        axes5 = fig.add_subplot(gs[4, :])
 
-    axes5.plot(stat_epochs, lfe_history, "--o", label="lfe")
-    axes5.plot(stat_epochs, energy_history, color='g', marker='o', label="energy")
-    axes5.legend(loc='lower left')
-    axes5_hatlambda = axes5.twinx()
-    axes5_hatlambda.plot(stat_epochs, hatlambda_history, color='r', marker='x', alpha=0.3, label="hatlambda")
-    axes5_hatlambda.legend(loc='lower right')
+        axes5.plot(stat_epochs, lfe_history, "--o", label="lfe")
+        axes5.plot(stat_epochs, energy_history, color='g', marker='o', label="energy")
+        axes5.legend(loc='lower left')
+        axes5_hatlambda = axes5.twinx()
+        axes5_hatlambda.plot(stat_epochs, hatlambda_history, color='r', marker='x', alpha=0.3, label="hatlambda")
+        axes5_hatlambda.legend(loc='lower right')
 
-    axes5.set_xlabel('Epoch')
-    axes5.set_ylabel('Energies')
-    axes5.set_xlim([0, max(snapshot_epoch) + 20])
-    axes5_hatlambda.set_ylabel('Hat lambda')
-    axes5.grid(axis='y', alpha=0.3)
+        axes5.set_xlabel('Epoch')
+        axes5.set_ylabel('Energies')
+        axes5.set_xlim([0, max(snapshot_epoch) + 20])
+        axes5_hatlambda.set_ylabel('Hat lambda')
+        axes5.grid(axis='y', alpha=0.3)
+    else:
+        prominence_cutoff = 1e-3
+
+        peaks, _ = find_peaks(covariance_maxeigenvalues)
+        prominences, _, _ = peak_prominences(covariance_maxeigenvalues, peaks)
+        print(peaks)
+        print(prominences)
+
+        # Remove insignificant peaks
+        peaks = [p for (p,prom) in zip(peaks,prominences) if prom > prominence_cutoff]
+
+        if len(peaks) > 0:
+            axes5 = fig.add_subplot(gs[4, :])
+            axes5.plot(loss_plot_range, rolling_loss, label="training loss")
+            axes5.fill_between(loss_plot_range, lower_band, upper_band, color='gray', alpha=0.1)
+            axes5.set_ylim([np.min(rolling_loss) - 0.02, rolling_loss_max])
+            axes5.set_xlim([0, max(snapshot_epoch) + 20])
+            axes5.grid(axis='y', alpha=0.3)
+            axes5.set_ylabel('Lyapunov funcs')
+
+            lya_window_size = 12
+            # For each peak, plot a Lyapunov function
+            for i, peak in enumerate(peaks):
+                # Put a vertical line in the plot at this transition
+                axes5.axvline(x=covariance_epochs[peak], color='blue', linestyle='--')
+
+                print("Graphing peak: ", peak)
+                C = covariance_matrices[peak]
+                lyapunov = []
+
+                for _, saved_state in enumerate(model_state_history[peak-lya_window_size:peak+1]):
+                    # NOTE really we should add the value of the loss at the averaged weights, we're
+                    # hoping the rolling loss is close
+                    W = saved_state["W"]
+                    b = saved_state["b"]
+                    w_vec = torch.cat((torch.flatten(W), b)) - covariance_meanvectors[peak]
+                    l = np.dot(w_vec, np.dot(C, w_vec)) + rolling_loss[covariance_epochs[peak]]
+                    lyapunov.append(l)
+                
+                axes5.plot(covariance_epochs[peak-lya_window_size:peak+1], lyapunov, label="transition " + str(i))
+            
+            axes5.legend(loc='upper right')
 
     def _get_save_filepath(outputdir):
         max_num = 0
