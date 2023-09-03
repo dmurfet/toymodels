@@ -228,7 +228,7 @@ def main(args):
 
         eigen_ratio = sorted_eigenvalues[0] / sorted_eigenvalues[1]
 
-        print("Max eigenvalue:", max_eigenvalue.item(), " Min eigenvalue:", min_eigenvalue.item(), " Eigenratio:", eigen_ratio.item())
+        print("Max eigenvalue: {:.5e}   Min eigenvalue: {:.5e}   Eigenratio: {:.5e}".format(max_eigenvalue.item(), min_eigenvalue.item(),eigen_ratio.item()))
 
         covariance_maxeigenvalues.append(max_eigenvalue)
         covariance_maxeigenvectors.append(max_eigenvector)
@@ -520,8 +520,8 @@ def main(args):
             plt.xlabel('Principal Component 1')
             plt.ylabel('Principal Component 2')
             plt.legend(loc='upper right')
-            plt.title(f"PCA of Weight Vectors in transition {num_transition}")
-            plt.colorbar(plt.cm.ScalarMappable(cmap=colormap), label='Order in Sequence')
+            plt.title(f"PCA of weight vectors before transition {num_transition}")
+            plt.colorbar(plt.cm.ScalarMappable(cmap=colormap), label='Weight trajectory time', ticks=[])
 
         for i, peak in enumerate(peaks):
             C = covariance_matrices[peak]
