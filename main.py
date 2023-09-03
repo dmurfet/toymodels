@@ -15,13 +15,13 @@ from copy import deepcopy
 import argparse
 import os
 from scipy.signal import find_peaks, peak_prominences
+from sklearn.decomposition import PCA
 import re
 
 from toymodels import ToyModelsDataset, ToyModelsNet
 from slt import LearningMachine
 
-# TODO
-#   - Plot test loss
+torch.set_printoptions(precision=4)
 
 def parse_commandline():
     parser = argparse.ArgumentParser(description="SLT Toy Model")
@@ -166,6 +166,7 @@ def main(args):
     covariance_epochs = []    
     covariance_maxeigenvalues = []
     covariance_maxeigenvectors = []
+    covariance_secondmaxeigenvectors = []
     covariance_matrices = []
     covariance_meanvectors = []
     covariance_eigenratios = []
@@ -222,13 +223,16 @@ def main(args):
         max_eigenvector = eigenresult.eigenvectors[:, idx].real
         min_eigenvalue, _ = torch.min(eigenvalues, dim=0)
 
-        sorted_eigenvalues, _ = torch.sort(torch.abs(eigenvalues), descending=True)
+        sorted_eigenvalues, sorted_indices = torch.sort(torch.abs(eigenvalues), descending=True)
+        second_largest_eigenvector = eigenresult.eigenvectors[:, sorted_indices[1]].real
+
         eigen_ratio = sorted_eigenvalues[0] / sorted_eigenvalues[1]
 
-        print("Max eigenvalue:", max_eigenvalue, " Min eigenvalue:", min_eigenvalue, " Eigenratio:", eigen_ratio)
+        print("Max eigenvalue:", max_eigenvalue.item(), " Min eigenvalue:", min_eigenvalue.item(), " Eigenratio:", eigen_ratio.item())
 
         covariance_maxeigenvalues.append(max_eigenvalue)
         covariance_maxeigenvectors.append(max_eigenvector)
+        covariance_secondmaxeigenvectors.append(second_largest_eigenvector)
         covariance_matrices.append(cov_matrix)
         covariance_meanvectors.append(mean_vector)
         covariance_eigenratios.append(eigen_ratio)
@@ -390,6 +394,7 @@ def main(args):
 
         # Remove insignificant peaks
         peaks = [p for (p,prom) in zip(peaks,prominences) if prom > prominence_cutoff]
+        data_for_peaks = []
 
         if len(peaks) > 0:
             axes5 = fig.add_subplot(gs[4, :])
@@ -409,15 +414,20 @@ def main(args):
                 C = covariance_matrices[peak]
                 lyapunov = []
 
-                for _, saved_state in enumerate(model_state_history[peak-lya_window_size:peak+1]):
+                start_index = max(0, peak-lya_window_size)
+                weight_vectors_for_this_peak = []
+
+                for _, saved_state in enumerate(model_state_history[start_index:peak+1]):
                     # NOTE really we should add the value of the loss at the averaged weights, we're
                     # hoping the rolling loss is close
                     W = saved_state["W"]
                     b = saved_state["b"]
                     w_vec = torch.cat((torch.flatten(W), b)) - covariance_meanvectors[peak]
+                    weight_vectors_for_this_peak.append(w_vec)
                     l = np.dot(w_vec, np.dot(C, w_vec)) + rolling_loss[covariance_epochs[peak]]
                     lyapunov.append(l)
-                start_index = max(0, peak-lya_window_size)
+                
+                data_for_peaks.append({"weights": weight_vectors_for_this_peak, "peak": peak})
                 axes5.plot(covariance_epochs[start_index:peak+1], lyapunov, label="transition " + str(i))
             
             axes5.legend(loc='upper right')
@@ -440,6 +450,78 @@ def main(args):
         outputdir = os.path.join(args.outputdir, f"m{m}n{n}")
         os.makedirs(outputdir, exist_ok=True)
         fig.savefig(_get_save_filepath(outputdir))
+
+    show_transition_pca = True
+    if not use_hatlambda_plot and show_transition_pca:
+        def plot_weight_vectors_pca(weight_vectors, max_eigenvector, second_maxeigenvector, C, num_transition):
+            weight_vectors = [w.detach().cpu().numpy() for w in weight_vectors]
+            max_eigenvector = max_eigenvector.detach().cpu().numpy()
+
+            # Apply PCA and reduce the data to 2 dimensions
+            pca = PCA(n_components=2)
+            projected_data = pca.fit_transform(weight_vectors)
+            
+
+            # Generate a colormap to color data points by their order in the sequence
+            colormap = plt.cm.jet  # or any other colormap you prefer
+            colors = [colormap(i) for i in np.linspace(0, 1, len(weight_vectors))]
+            
+            # Plot the projected data
+            plt.figure(figsize=(10, 6))
+            plt.scatter(0, 0, color='black', s=50)
+            for i, (x, y) in enumerate(projected_data):
+                plt.scatter(x, y, color=colors[i], edgecolors='black', linewidths=1)
+            
+            # Draw a line in the direction of the two eigenvectors
+            x_min, x_max = projected_data[:, 0].min() * 0.9, projected_data[:, 0].max() * 1.1
+            y_min, y_max = projected_data[:, 1].min() * 0.9, projected_data[:, 1].max() * 1.1
+
+            vector_x, vector_y = pca.transform(max_eigenvector.reshape(1, -1)).ravel()
+            if vector_x == 0:
+                plt.plot([0, 0], [y_min, y_max], 'k-', linewidth=1, label='Principal eigenspace')
+            else:
+                slope = vector_y / vector_x
+                y1 = slope * x_min
+                y2 = slope * x_max
+                plt.plot([x_min, x_max], [y1, y2], 'k-', linewidth=1, label='Principal eigenspace')
+
+            vector_x, vector_y = pca.transform(second_maxeigenvector.reshape(1, -1)).ravel()
+            if vector_x == 0:
+                plt.plot([0, 0], [y_min, y_max], 'k--', linewidth=1, label='Secondary eigenspace')
+            else:
+                slope = vector_y / vector_x
+                y1 = slope * x_min
+                y2 = slope * x_max
+                plt.plot([x_min, x_max], [y1, y2], 'k--', linewidth=1, label='Secondary eigenspace')
+            
+            # Create a grid for the density plot
+            xx, yy = np.meshgrid(np.linspace(x_min, x_max, 100), np.linspace(y_min, y_max, 100))
+
+            # Compute function values for the grid
+            Z = np.zeros(xx.shape)
+            for i in range(xx.shape[0]):
+                for j in range(xx.shape[1]):
+                    u = xx[i, j] * pca.components_[0] + yy[i, j] * pca.components_[1]
+                    Z[i, j] = np.dot(u.T, np.dot(C, u))
+
+            # Plot the density map
+            Z = (Z - Z.min()) / (Z.max() - Z.min()) # rescale
+            plt.imshow(Z, interpolation='bilinear', origin='lower',
+               extent=(x_min, x_max, y_min, y_max), cmap='Blues', alpha=0.75, aspect='auto')
+            cbar = plt.colorbar()
+            cbar.set_label('Lyapunov values', rotation=270, labelpad=15)
+    
+            plt.xlabel('Principal Component 1')
+            plt.ylabel('Principal Component 2')
+            plt.legend(loc='upper right')
+            plt.title(f"PCA of Weight Vectors in transition {num_transition}")
+            plt.colorbar(plt.cm.ScalarMappable(cmap=colormap), label='Order in Sequence')
+
+        for i, peak in enumerate(peaks):
+            C = covariance_matrices[peak]
+            eigenvector = covariance_maxeigenvectors[peak]
+            second_eigenvector = covariance_secondmaxeigenvectors[peak]
+            plot_weight_vectors_pca(data_for_peaks[i]["weights"], eigenvector, second_eigenvector, C, i)
 
     plt.show()
 
