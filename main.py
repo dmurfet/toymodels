@@ -473,8 +473,14 @@ def main(args):
                 plt.scatter(x, y, color=colors[i], edgecolors='black', linewidths=1)
             
             # Draw a line in the direction of the two eigenvectors
-            x_min, x_max = projected_data[:, 0].min() * 0.9, projected_data[:, 0].max() * 1.1
-            y_min, y_max = projected_data[:, 1].min() * 0.9, projected_data[:, 1].max() * 1.1
+            x_min, x_max = projected_data[:, 0].min(), projected_data[:, 0].max()
+            y_min, y_max = projected_data[:, 1].min(), projected_data[:, 1].max()
+            x_delta = x_max - x_min
+            y_delta = y_max - y_min
+            x_min -= 0.05 * x_delta
+            x_max += 0.05 * x_delta
+            y_min -= 0.05 * y_delta
+            y_max += 0.05 * y_delta
 
             vector_x, vector_y = pca.transform(max_eigenvector.reshape(1, -1)).ravel()
             if vector_x == 0:
@@ -509,7 +515,7 @@ def main(args):
             plt.imshow(Z, interpolation='bilinear', origin='lower',
                extent=(x_min, x_max, y_min, y_max), cmap='Blues', alpha=0.75, aspect='auto')
             cbar = plt.colorbar()
-            cbar.set_label('Lyapunov values', rotation=270, labelpad=15)
+            cbar.set_label('Lyapunov values', rotation=90, labelpad=15)
     
             plt.xlabel('Principal Component 1')
             plt.ylabel('Principal Component 2')
