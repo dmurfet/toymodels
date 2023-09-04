@@ -1,5 +1,6 @@
 # Example usage
 # python main.py --m 2 --n 5 --epochs 20000 --max_loss_plot 0.06
+# python main.py --m 2 --n 8 --epochs 2000 --init_polygon 2 --detect_transitions
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -38,6 +39,9 @@ def parse_commandline():
     parser.add_argument("--truth_gamma", help="Related to std for true distribution", type=int, default=10)
     parser.add_argument("--max_loss_plot", help="Maximum on y axis for loss plot", type=float, default=None)
     parser.add_argument("--save_plot", help="Save the resulting plot", action="store_true")
+    parser.add_argument("--detect_transitions", help="Whether to run the transition detection", action="store_true")
+    parser.add_argument("--prominence_cutoff", help="Prominence cutoff for bifurcation detection", type=float, default=5e-4)
+    parser.add_argument("--covariance_checkpoints", help="Number of points at which to compute covariance matrices", type=int, default=120)
     parser.add_argument(
         "--outputdir",
         help="Path to output directory. Create if not exist.",
@@ -51,10 +55,12 @@ def main(args):
     m, n = args.m, args.n
     num_epochs = args.epochs
     init_polygon = args.init_polygon
+    prominence_cutoff = args.prominence_cutoff
+
     lr_init = args.lr
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
 
-    num_covariance_checkpoints = 120
+    num_covariance_checkpoints = args.covariance_checkpoints
     steps_per_epoch = 128
     num_plots = 5
     first_snapshot_epoch = 200
@@ -252,7 +258,7 @@ def main(args):
     
     gs = gridspec.GridSpec(plot_rows, num_plots, height_ratios=plot_ratios)
     fig = plt.figure(figsize=(35, plot_height))
-    fig.suptitle(f"Toy models (n={n}, m={m}, init_polygon={args.init_polygon or 'None'})", fontsize=10)
+    fig.suptitle(f"Toy models (n={n}, m={m}, init_polygon={args.init_polygon or 'None'}{'' if not args.detect_transitions else ', prominence=' + str(args.prominence_cutoff)})", fontsize=10)
     if m == 2:
         axes1 = [fig.add_subplot(gs[0, i]) for i in range(num_plots)]
     elif m == 3:
@@ -367,9 +373,8 @@ def main(args):
     axes4.grid(axis='y', alpha=0.3)
     axes4.legend(loc='upper right')
     
-    # Set up the subplot for lfe, energy and hatlambda
-    use_hatlambda_plot = False
-    if use_hatlambda_plot:
+    if not args.detect_transitions:
+        # Set up the subplot for lfe, energy and hatlambda
         axes5 = fig.add_subplot(gs[4, :])
 
         axes5.plot(stat_epochs, lfe_history, "--o", label="lfe")
@@ -385,8 +390,7 @@ def main(args):
         axes5_hatlambda.set_ylabel('Hat lambda')
         axes5.grid(axis='y', alpha=0.3)
     else:
-        prominence_cutoff = 5e-4
-
+        # Show the transition detection code
         peaks, _ = find_peaks(covariance_maxeigenvalues)
         prominences, _, _ = peak_prominences(covariance_maxeigenvalues, peaks)
         print(peaks)
@@ -405,7 +409,7 @@ def main(args):
             axes5.grid(axis='y', alpha=0.3)
             axes5.set_ylabel('Lyapunov funcs')
 
-            lya_window_size = 30
+            lya_window_size = round(args.covariance_checkpoints / 4)
             # For each peak, plot a Lyapunov function
             for i, peak in enumerate(peaks):
                 # Put a vertical line in the plot at this transition
@@ -451,8 +455,7 @@ def main(args):
         os.makedirs(outputdir, exist_ok=True)
         fig.savefig(_get_save_filepath(outputdir))
 
-    show_transition_pca = True
-    if not use_hatlambda_plot and show_transition_pca:
+    if args.detect_transitions:
         def plot_weight_vectors_pca(weight_vectors, max_eigenvector, second_maxeigenvector, C, num_transition):
             weight_vectors = [w.detach().cpu().numpy() for w in weight_vectors]
             max_eigenvector = max_eigenvector.detach().cpu().numpy()
@@ -460,7 +463,6 @@ def main(args):
             # Apply PCA and reduce the data to 2 dimensions
             pca = PCA(n_components=2)
             projected_data = pca.fit_transform(weight_vectors)
-            
 
             # Generate a colormap to color data points by their order in the sequence
             colormap = plt.cm.get_cmap('viridis', 256)  # or any other colormap you prefer plt.cm.jet
