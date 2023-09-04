@@ -54,7 +54,7 @@ def main(args):
     lr_init = args.lr
     truth_gamma = args.truth_gamma # 1/sqrt(truth_gamma) is the std of the true distribution q(y|x)
 
-    num_covariance_checkpoints = 80
+    num_covariance_checkpoints = 120
     steps_per_epoch = 128
     num_plots = 5
     first_snapshot_epoch = 200
@@ -405,7 +405,7 @@ def main(args):
             axes5.grid(axis='y', alpha=0.3)
             axes5.set_ylabel('Lyapunov funcs')
 
-            lya_window_size = 10
+            lya_window_size = 30
             # For each peak, plot a Lyapunov function
             for i, peak in enumerate(peaks):
                 # Put a vertical line in the plot at this transition
@@ -463,7 +463,7 @@ def main(args):
             
 
             # Generate a colormap to color data points by their order in the sequence
-            colormap = plt.cm.jet  # or any other colormap you prefer
+            colormap = plt.cm.get_cmap('viridis', 256)  # or any other colormap you prefer plt.cm.jet
             colors = [colormap(i) for i in np.linspace(0, 1, len(weight_vectors))]
             
             # Plot the projected data
@@ -521,7 +521,7 @@ def main(args):
             plt.ylabel('Principal Component 2')
             plt.legend(loc='upper right')
             plt.title(f"PCA of weight vectors before transition {num_transition}")
-            plt.colorbar(plt.cm.ScalarMappable(cmap=colormap), label='Weight trajectory time', ticks=[])
+            plt.colorbar(plt.cm.ScalarMappable(cmap=colormap), label='Development time', ticks=[])
 
         for i, peak in enumerate(peaks):
             C = covariance_matrices[peak]
