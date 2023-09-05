@@ -355,13 +355,13 @@ def main(args):
     #axes4_frob.plot(stat_epochs, dims_per_feature, color='g', marker='o', alpha=0.3, label="Dims per feature")
     #axes4_frob.set_ylabel('Dims per feature')
     axes4_eigen = axes4.twinx()
-    axes4_eigen.plot(covariance_epochs, covariance_maxeigenvalues, color='g', marker='o', alpha=0.3, label="Max cov eigen")
-    axes4_eigen.set_ylabel('Max cov eigen')
+    axes4_eigen.plot(covariance_epochs, covariance_maxeigenvalues, color='g', marker='o', alpha=0.3, label="Max eigenvalue")
+    axes4_eigen.set_ylabel('Max eigenvalue')
     axes4_eigen.set_yscale('log')
 
     axes4.scatter(snapshot_epoch, [loss_history[i - 1] for i in snapshot_epoch], color='r', marker='o')
     axes4.set_xticklabels([])
-    axes4.set_ylabel('Losses')
+    axes4.set_ylabel('Loss')
 
     if not args.max_loss_plot:
         rolling_loss_max = energy_history[0] / total_train + 0.04
@@ -402,12 +402,12 @@ def main(args):
 
         if len(peaks) > 0:
             axes5 = fig.add_subplot(gs[4, :])
-            axes5.plot(loss_plot_range, rolling_loss, label="training loss")
+            axes5.plot(loss_plot_range, rolling_loss)
             axes5.fill_between(loss_plot_range, lower_band, upper_band, color='gray', alpha=0.1)
             axes5.set_ylim([np.min(rolling_loss) - 0.02, rolling_loss_max])
             axes5.set_xlim([0, max(snapshot_epoch) + 20])
             axes5.grid(axis='y', alpha=0.3)
-            axes5.set_ylabel('Lyapunov funcs')
+            axes5.set_ylabel('Lyapunov')
 
             lya_window_size = round(args.covariance_checkpoints / 4)
             # For each peak, plot a Lyapunov function
@@ -456,23 +456,25 @@ def main(args):
         fig.savefig(_get_save_filepath(outputdir))
 
     if args.detect_transitions:
-        def plot_weight_vectors_pca(weight_vectors, max_eigenvector, second_maxeigenvector, C, num_transition):
+        def plot_weight_vectors_pca(weight_vectors, max_eigenvector, second_maxeigenvector, C, num_transition, eigenratio):
             weight_vectors = [w.detach().cpu().numpy() for w in weight_vectors]
             max_eigenvector = max_eigenvector.detach().cpu().numpy()
 
-            # Apply PCA and reduce the data to 2 dimensions
             pca = PCA(n_components=2)
             projected_data = pca.fit_transform(weight_vectors)
+            variance_explained = pca.explained_variance_ratio_
 
             # Generate a colormap to color data points by their order in the sequence
             colormap = plt.cm.get_cmap('viridis', 256)  # or any other colormap you prefer plt.cm.jet
             colors = [colormap(i) for i in np.linspace(0, 1, len(weight_vectors))]
             
             # Plot the projected data
-            plt.figure(figsize=(10, 6))
-            plt.scatter(0, 0, color='black', s=50)
-            for i, (x, y) in enumerate(projected_data):
-                plt.scatter(x, y, color=colors[i], edgecolors='black', linewidths=1)
+            fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 6))
+            fig.suptitle(f"PCA of trajectory in weight space, transition={num_transition}, leading eigenvalue ratio={eigenratio:.5e}")
+            
+            axes[0].scatter(0, 0, color='black', s=50)
+            for i, (x,y) in enumerate(projected_data):
+                axes[0].scatter(x, y, color=colors[i], edgecolors='black', linewidths=1)
             
             # Draw a line in the direction of the two eigenvectors
             x_min, x_max = projected_data[:, 0].min(), projected_data[:, 0].max()
@@ -486,21 +488,21 @@ def main(args):
 
             vector_x, vector_y = pca.transform(max_eigenvector.reshape(1, -1)).ravel()
             if vector_x == 0:
-                plt.plot([0, 0], [y_min, y_max], 'k-', linewidth=1, label='Principal eigenspace')
+                axes[0].plot([0, 0], [y_min, y_max], 'k-', linewidth=1, label='Principal eigenspace')
             else:
                 slope = vector_y / vector_x
                 y1 = slope * x_min
                 y2 = slope * x_max
-                plt.plot([x_min, x_max], [y1, y2], 'k-', linewidth=1, label='Principal eigenspace')
+                axes[0].plot([x_min, x_max], [y1, y2], 'k-', linewidth=1, label='Principal eigenspace')
 
             vector_x, vector_y = pca.transform(second_maxeigenvector.reshape(1, -1)).ravel()
             if vector_x == 0:
-                plt.plot([0, 0], [y_min, y_max], 'k--', linewidth=1, label='Secondary eigenspace')
+                axes[0].plot([0, 0], [y_min, y_max], 'k--', linewidth=1, label='Secondary eigenspace')
             else:
                 slope = vector_y / vector_x
                 y1 = slope * x_min
                 y2 = slope * x_max
-                plt.plot([x_min, x_max], [y1, y2], 'k--', linewidth=1, label='Secondary eigenspace')
+                axes[0].plot([x_min, x_max], [y1, y2], 'k--', linewidth=1, label='Secondary eigenspace')
             
             # Create a grid for the density plot
             xx, yy = np.meshgrid(np.linspace(x_min, x_max, 100), np.linspace(y_min, y_max, 100))
@@ -514,22 +516,29 @@ def main(args):
 
             # Plot the density map
             Z = (Z - Z.min()) / (Z.max() - Z.min()) # rescale
-            plt.imshow(Z, interpolation='bilinear', origin='lower',
+            im = axes[0].imshow(Z, interpolation='bilinear', origin='lower',
                extent=(x_min, x_max, y_min, y_max), cmap='Blues', alpha=0.75, aspect='auto')
-            cbar = plt.colorbar()
-            cbar.set_label('Lyapunov values', rotation=90, labelpad=15)
-    
-            plt.xlabel('Principal Component 1')
-            plt.ylabel('Principal Component 2')
-            plt.legend(loc='upper right')
-            plt.title(f"PCA of weight vectors before transition {num_transition}")
-            plt.colorbar(plt.cm.ScalarMappable(cmap=colormap), label='Development time', ticks=[])
+            
+            # Lyapunov values are from 0 (white) to 1 (blue)
+            # Development time is from dark purple to yellow
+
+            axes[0].set_xlabel('PC 1')
+            axes[0].set_ylabel('PC 2')
+            axes[0].legend(loc='upper right')
+
+            # Plot variance explained
+            axes[1].bar(np.arange(len(variance_explained)), variance_explained, alpha=0.7, align='center')
+            axes[1].set_ylabel('Proportion of Variance')
+            axes[1].set_xlabel('PC')
+            axes[1].set_xticks(np.arange(len(variance_explained)))
 
         for i, peak in enumerate(peaks):
             C = covariance_matrices[peak]
             eigenvector = covariance_maxeigenvectors[peak]
             second_eigenvector = covariance_secondmaxeigenvectors[peak]
-            plot_weight_vectors_pca(data_for_peaks[i]["weights"], eigenvector, second_eigenvector, C, i)
+            eigenratio = covariance_eigenratios[peak]
+
+            plot_weight_vectors_pca(data_for_peaks[i]["weights"], eigenvector, second_eigenvector, C, i, eigenratio)
 
     plt.show()
 
