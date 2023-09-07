@@ -40,7 +40,7 @@ def parse_commandline():
     parser.add_argument("--max_loss_plot", help="Maximum on y axis for loss plot", type=float, default=None)
     parser.add_argument("--save_plot", help="Save the resulting plot", action="store_true")
     parser.add_argument("--detect_transitions", help="Whether to run the transition detection", action="store_true")
-    parser.add_argument("--prominence_cutoff", help="Prominence cutoff for bifurcation detection", type=float, default=5e-4)
+    parser.add_argument("--prominence_cutoff", help="Prominence cutoff for bifurcation detection", type=float, default=1e-5)
     parser.add_argument("--covariance_checkpoints", help="Number of points at which to compute covariance matrices", type=int, default=120)
     parser.add_argument(
         "--outputdir",
@@ -49,6 +49,8 @@ def parse_commandline():
         default=None,
     )
     return parser
+
+# Remark: prominence cutoff defaulted to 5e-4 for maximum eigenvalues, now 1e-5 for covariane derivative
 
 def main(args):
     # Hyperparameters
@@ -101,7 +103,6 @@ def main(args):
     hatlambda_history = []
     dims_per_feature = []
     model_state_history = []
-    testloss_history = []
 
     def dim_per_feature(W):
         out = W.size(0) / (torch.linalg.matrix_norm(W) ** 2)
@@ -167,9 +168,13 @@ def main(args):
     # Compute covariance matrices
     #
 
-    num_trajectories = 200
-    num_covariant_chain_steps = 100
-    covariance_epochs = []    
+    # Historical note 6-9-23: originally our code had a bug, which meant the covariance matrix was computed
+    # from the following set of samples: starting at the saved W and saved b, it did the following 200 times
+    # in a row: take 100 SGD steps and record the weight (without restarting).
+
+    num_trajectories = 2
+    num_covariant_chain_steps = 2 * covariance_interval * steps_per_epoch # 200 * 100
+    covariance_epochs = []
     covariance_maxeigenvalues = []
     covariance_maxeigenvectors = []
     covariance_secondmaxeigenvectors = []
@@ -179,49 +184,67 @@ def main(args):
 
     print("")
     print("Computing covariance matrices")
-    for _, saved_state in enumerate(model_state_history):
-        covariance_epochs.append(saved_state["epoch"])
-        X_list = []
+    
+    def sgd_trajectory(initial_W, initial_b, num_steps, thinning_factor=100):
+        # Create a new model and optimizer instance
+        new_model = ToyModelsNet(n, m, init_config=init_polygon, noise_scale=args.init_noise_scale, use_optimal=True)
+        new_model.W.data = initial_W.clone().detach()
+        new_model.b.data = initial_b.clone().detach()
+        new_model.to(device)
+        new_optimizer = optim.SGD(new_model.parameters(), lr=lr)
 
-        for i in range(num_trajectories):
+        # Create an independent training set        
+        new_trainset = ToyModelsDataset(num_steps, n, truth_gamma)
+        new_trainloader = torch.utils.data.DataLoader(new_trainset, batch_size=1, shuffle=True)
+        new_dataiter = iter(new_trainloader)
+
+        trajectory = []
+
+        for i in range(num_steps):
+            data = next(new_dataiter)
+            x = data[0].to(device)
+            
+            # Forward pass
+            output = new_model(x)
+            loss = criterion(output, x)
+            loss = loss * truth_gamma / 2
+
+            # Backward pass
+            new_optimizer.zero_grad()
+            loss.backward()
+            new_optimizer.step()
+            
+            if i > 0 and i % thinning_factor == 0:
+                W_flat = torch.flatten(new_model.W)
+                combined_vector = torch.cat((W_flat, new_model.b))
+                trajectory.append(combined_vector.cpu().detach().clone())
+
+        return trajectory
+
+    for i, _ in enumerate(model_state_history):
+        this_state = model_state_history[i]
+        if i == 0:
+            previous_state = this_state
+        else:
+            previous_state = model_state_history[i-1]
+
+        covariance_epochs.append(this_state["epoch"])
+
+        # We run SGD trajectories starting at the previous checkpoint and running roughly long
+        # enough to have made it to the next checkpoint. Recall that the number of steps between
+        # checkpoints is covariance_interval * steps_per_epoch
+
+        X_list = []
+        for i in range(num_trajectories):   
             torch.manual_seed(i)
             torch.cuda.manual_seed_all(i)
-            
-            # Create a new model and optimizer instance
-            new_model = ToyModelsNet(n, m, init_config=init_polygon, noise_scale=args.init_noise_scale, use_optimal=True)
-            new_model.W.data = saved_state["W"]
-            new_model.b.data = saved_state["b"]
-            #new_model = add_gaussian_noise_to_state(new_model, std=0.01)
-            new_model.to(device)
-            new_optimizer = optim.SGD(new_model.parameters(), lr=lr)
-
-            # Create an independent training set        
-            new_trainset = ToyModelsDataset(num_covariant_chain_steps, n, truth_gamma)
-            new_trainloader = torch.utils.data.DataLoader(new_trainset, batch_size=1, shuffle=True)
-            new_dataiter = iter(new_trainloader)
-
-            for _ in range(num_covariant_chain_steps):
-                data = next(new_dataiter)
-                x = data[0].to(device)
-                
-                # Forward pass
-                output = new_model(x)
-                loss = criterion(output, x)
-                loss = loss * truth_gamma / 2
-
-                # Backward pass
-                new_optimizer.zero_grad()
-                loss.backward()
-                new_optimizer.step()
-
-            W_flat = torch.flatten(new_model.W)
-            combined_vector = torch.cat((W_flat, new_model.b))
-            X_list.append(combined_vector.cpu().detach().clone())
+            trajectory = sgd_trajectory(previous_state["W"],previous_state["b"],num_covariant_chain_steps)
+            X_list += trajectory
 
         X = torch.stack(X_list)
         mean_vector = torch.mean(X, dim=0)
         X_centered = X - mean_vector
-        cov_matrix = X_centered.t().mm(X_centered) / (X.size(0) - 1)
+        cov_matrix = X_centered.t().mm(X_centered) / (X.size(0) - 1) # C = E[ (w - w^*)^T (w - w^*) ]
         
         eigenresult = torch.linalg.eig(cov_matrix)
         eigenvalues = eigenresult.eigenvalues.real
@@ -390,15 +413,27 @@ def main(args):
         axes5_hatlambda.set_ylabel('Hat lambda')
         axes5.grid(axis='y', alpha=0.3)
     else:
-        # Show the transition detection code
-        peaks, _ = find_peaks(covariance_maxeigenvalues)
-        prominences, _, _ = peak_prominences(covariance_maxeigenvalues, peaks)
+        # Look for places where the covariant matrix is changing relatively little,
+        # as this is a precondition for a bifurcation (stationary point of the
+        # Ornstein-Uhlenbeck process).
+        
+        # Uncomment to use peaks in maximum eigenvalues of C as the target
+        #peaks, _ = find_peaks(covariance_maxeigenvalues)
+        #prominences, _, _ = peak_prominences(covariance_maxeigenvalues, peaks)
+        covariance_deltas = [torch.norm(covariance_matrices[i] - covariance_matrices[i-1],p='fro') for i in range(1,len(covariance_epochs))]
+
+        # Look for local _minima_ in the deltas between subsequent covariance matrices
+        # as this should detect "corners"
+        neg_covariance_deltas = [-a for a in covariance_deltas]
+        peaks, _ = find_peaks(neg_covariance_deltas)
+        prominences, _, _ = peak_prominences(neg_covariance_deltas, peaks)
         print(peaks)
         print(prominences)
 
-        # Remove insignificant peaks
-        peaks = [p for (p,prom) in zip(peaks,prominences) if prom > prominence_cutoff]
+        # Remove insignificant peaks (the + 1 since we cut off the beginning of covariance_deltas)
+        peaks = [p + 1 for (p,prom) in zip(peaks,prominences) if prom > prominence_cutoff]
         data_for_peaks = []
+        lya_window_size = round(args.covariance_checkpoints / 4)
 
         if len(peaks) > 0:
             axes5 = fig.add_subplot(gs[4, :])
@@ -409,7 +444,6 @@ def main(args):
             axes5.grid(axis='y', alpha=0.3)
             axes5.set_ylabel('Lyapunov')
 
-            lya_window_size = round(args.covariance_checkpoints / 4)
             # For each peak, plot a Lyapunov function
             for i, peak in enumerate(peaks):
                 # Put a vertical line in the plot at this transition
@@ -419,11 +453,11 @@ def main(args):
                 lyapunov = []
 
                 start_index = max(0, peak-lya_window_size)
+                end_index = min(len(model_state_history),peak+lya_window_size) # was + 1
                 weight_vectors_for_this_peak = []
 
-                for _, saved_state in enumerate(model_state_history[start_index:peak+1]):
-                    # NOTE really we should add the value of the loss at the averaged weights, we're
-                    # hoping the rolling loss is close
+                for _, saved_state in enumerate(model_state_history[start_index:end_index]):
+                    # NOTE really we should add the value of the loss at the averaged weights, we're hoping the rolling loss is close
                     W = saved_state["W"]
                     b = saved_state["b"]
                     w_vec = torch.cat((torch.flatten(W), b)) - covariance_meanvectors[peak]
@@ -432,8 +466,13 @@ def main(args):
                     lyapunov.append(l)
                 
                 data_for_peaks.append({"weights": weight_vectors_for_this_peak, "peak": peak})
-                axes5.plot(covariance_epochs[start_index:peak+1], lyapunov, label="transition " + str(i))
+                #axes5.plot(covariance_epochs[start_index:end_index], lyapunov, label="transition " + str(i))
             
+            axes5_covdelta = axes5.twinx()
+            axes5_covdelta.plot(covariance_epochs[1:], covariance_deltas, color='b', marker='o', alpha=0.3, label="Cov delta")
+            axes5_covdelta.set_ylabel('Cov delta')
+            axes5_covdelta.set_yscale('log')
+
             axes5.legend(loc='upper right')
 
     def _get_save_filepath(outputdir):
@@ -456,29 +495,53 @@ def main(args):
         fig.savefig(_get_save_filepath(outputdir))
 
     if args.detect_transitions:
-        def plot_weight_vectors_pca(weight_vectors, max_eigenvector, second_maxeigenvector, C, num_transition, eigenratio):
+        def plot_weight_vectors_pca(weight_vectors, max_eigenvector, second_maxeigenvector, C, num_transition, eigenratio, trajectories_start, meanvector, num_sgd_steps):
             weight_vectors = [w.detach().cpu().numpy() for w in weight_vectors]
             max_eigenvector = max_eigenvector.detach().cpu().numpy()
+
+            # Compute a number of SGD trajectories
+            trajectories = []
+            for j in range(5):
+                torch.manual_seed(j)
+                torch.cuda.manual_seed_all(j)
+                trajectories = sgd_trajectory(trajectories_start["W"],trajectories_start["b"],num_sgd_steps)
+                t_list = [(t - meanvector).numpy() for t in trajectories]
+                weight_vectors += t_list
+                trajectory = np.array(t_list)
+                trajectories.append(trajectory)
 
             pca = PCA(n_components=2)
             projected_data = pca.fit_transform(weight_vectors)
             variance_explained = pca.explained_variance_ratio_
-
-            # Generate a colormap to color data points by their order in the sequence
-            colormap = plt.cm.get_cmap('viridis', 256)  # or any other colormap you prefer plt.cm.jet
-            colors = [colormap(i) for i in np.linspace(0, 1, len(weight_vectors))]
             
-            # Plot the projected data
+            # Plot the projected data of the original SGD trajectory
             fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 6))
-            fig.suptitle(f"PCA of trajectory in weight space, transition={num_transition}, leading eigenvalue ratio={eigenratio:.5e}")
+            fig.suptitle(f"PCA projection of development, transition={num_transition}, leading eigenvalue ratio={eigenratio:.5e}")
             
+            x_min, x_max = projected_data[:, 0].min(), projected_data[:, 0].max()
+            y_min, y_max = projected_data[:, 1].min(), projected_data[:, 1].max()
+            colormap = plt.cm.get_cmap('viridis', 256)
+            
+            for _, trajectory in enumerate(trajectories):
+                projected_trajectory = pca.transform(trajectory)
+                
+                colors = [colormap(i) for i in np.linspace(0, 1, len(trajectory))]
+                for i, (x,y) in enumerate(projected_trajectory):
+                    axes[0].scatter(x, y, color=colors[i])
+
+                x_min = min(x_min, projected_trajectory[:,0].min())
+                x_max = max(x_max, projected_trajectory[:,0].max())
+                y_min = min(y_min, projected_trajectory[:,1].min())
+                y_max = max(y_max, projected_trajectory[:,1].max())
+            
+            # Scatter plot the true trajectory
+            colormap = plt.cm.get_cmap('Greys', 256)
+            colors = [colormap(i) for i in np.linspace(0, 1, len(weight_vectors))]
             axes[0].scatter(0, 0, color='black', s=50)
             for i, (x,y) in enumerate(projected_data):
                 axes[0].scatter(x, y, color=colors[i], edgecolors='black', linewidths=1)
-            
-            # Draw a line in the direction of the two eigenvectors
-            x_min, x_max = projected_data[:, 0].min(), projected_data[:, 0].max()
-            y_min, y_max = projected_data[:, 1].min(), projected_data[:, 1].max()
+
+            # Draw a line in the direction of the two eigenvectors of the covariance matrix
             x_delta = x_max - x_min
             y_delta = y_max - y_min
             x_min -= 0.05 * x_delta
@@ -536,9 +599,14 @@ def main(args):
             C = covariance_matrices[peak]
             eigenvector = covariance_maxeigenvectors[peak]
             second_eigenvector = covariance_secondmaxeigenvectors[peak]
+            meanvector = covariance_meanvectors[peak]
             eigenratio = covariance_eigenratios[peak]
+            sgd_length = 10
+            start_index = max(0, peak-sgd_length)
+            saved_state = model_state_history[start_index] #model_state_history[peak]
+            num_sgd_steps = 2 * sgd_length * covariance_interval * steps_per_epoch
 
-            plot_weight_vectors_pca(data_for_peaks[i]["weights"], eigenvector, second_eigenvector, C, i, eigenratio)
+            plot_weight_vectors_pca(data_for_peaks[i]["weights"], eigenvector, second_eigenvector, C, i, eigenratio, saved_state, meanvector, num_sgd_steps)
 
     plt.show()
 
