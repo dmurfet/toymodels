@@ -500,29 +500,32 @@ def main(args):
             max_eigenvector = max_eigenvector.detach().cpu().numpy()
 
             # Compute a number of SGD trajectories
-            trajectories = []
+            all_trajectories = []
+            weights_and_trajectories = []
+            weights_and_trajectories += weight_vectors
+
             for j in range(5):
                 torch.manual_seed(j)
                 torch.cuda.manual_seed_all(j)
                 trajectories = sgd_trajectory(trajectories_start["W"],trajectories_start["b"],num_sgd_steps)
                 t_list = [(t - meanvector).numpy() for t in trajectories]
-                weight_vectors += t_list
-                trajectory = np.array(t_list)
-                trajectories.append(trajectory)
+                weights_and_trajectories += t_list
+                all_trajectories.append(np.array(t_list))
 
             pca = PCA(n_components=2)
-            projected_data = pca.fit_transform(weight_vectors)
+            pca.fit_transform(weights_and_trajectories)
             variance_explained = pca.explained_variance_ratio_
             
             # Plot the projected data of the original SGD trajectory
             fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(12, 6))
             fig.suptitle(f"PCA projection of development, transition={num_transition}, leading eigenvalue ratio={eigenratio:.5e}")
             
+            projected_data = pca.transform(weight_vectors)
             x_min, x_max = projected_data[:, 0].min(), projected_data[:, 0].max()
             y_min, y_max = projected_data[:, 1].min(), projected_data[:, 1].max()
             colormap = plt.cm.get_cmap('viridis', 256)
-            
-            for _, trajectory in enumerate(trajectories):
+
+            for _, trajectory in enumerate(all_trajectories):
                 projected_trajectory = pca.transform(trajectory)
                 
                 colors = [colormap(i) for i in np.linspace(0, 1, len(trajectory))]
@@ -601,7 +604,7 @@ def main(args):
             second_eigenvector = covariance_secondmaxeigenvectors[peak]
             meanvector = covariance_meanvectors[peak]
             eigenratio = covariance_eigenratios[peak]
-            sgd_length = 10
+            sgd_length = 30 # 10
             start_index = max(0, peak-sgd_length)
             saved_state = model_state_history[start_index] #model_state_history[peak]
             num_sgd_steps = 2 * sgd_length * covariance_interval * steps_per_epoch
